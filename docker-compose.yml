@@ -120,7 +120,7 @@ services:
       dockerfile: Dockerfile.fastapi
     environment:
       PG_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      NEO4J_URI: bolt://neo4j:7687
+      KB_NEO4J_URI: bolt://neo4j:7687
       QDRANT_URL: http://qdrant:6333
       DB_WAIT_TIMEOUT: 60
       DB_WAIT_INTERVAL: 2
@@ -160,7 +160,7 @@ services:
       dockerfile: Dockerfile.fastapi
     environment:
       PG_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      NEO4J_URI: bolt://neo4j:7687
+      KB_NEO4J_URI: bolt://neo4j:7687
       QDRANT_URL: http://qdrant:6333
       DB_WAIT_TIMEOUT: 60
       DB_WAIT_INTERVAL: 2
@@ -193,6 +193,7 @@ services:
       - "traefik.http.routers.fastapi-dev-xteam-sec.tls.certresolver=le"
 
   redis:
+    profiles: ["dev", "prod", "infra", "monitoring", "frontend-hot"]
     platform: linux/amd64
     env_file:
       - ${ENV_FILE:-.env.prod}
@@ -266,6 +267,7 @@ services:
       - "traefik.http.routers.grafana-xteam-sec.middlewares=dashboard-auth"
 
   neo4j:
+    profiles: ["dev", "prod", "infra", "monitoring", "frontend-hot"]
     platform: linux/amd64
     image: neo4j:5.26
     restart: unless-stopped
@@ -299,6 +301,7 @@ services:
       - "traefik.tcp.routers.neo4j-bolt.tls.certresolver=le"
 
   postgres:
+    profiles: ["dev", "prod", "infra", "monitoring", "frontend-hot"]
     platform: linux/amd64
     env_file:
       - ${ENV_FILE:-.env.prod}
@@ -315,6 +318,7 @@ services:
       - "traefik.enable=false"
 
   qdrant:
+    profiles: ["dev", "prod", "infra", "monitoring", "frontend-hot"]
     platform: linux/amd64
     env_file:
       - ${ENV_FILE:-.env.prod}
@@ -347,6 +351,7 @@ services:
       - "traefik.http.routers.qdrant-xteam-sec.middlewares=dashboard-auth"
 
   adminer:
+    profiles: ["dev", "prod", "infra", "monitoring", "frontend-hot"]
     platform: linux/amd64
     image: adminer:latest
     restart: unless-stopped
