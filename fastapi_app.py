@@ -57,6 +57,12 @@ class RoadmapRequest(BaseModel):
     limit: int = 50
 
 
+@app.get("/health", summary="Health check", description="Check if the API is running")
+def health_check():
+    """Simple health check endpoint"""
+    return {"status": "healthy", "service": "KnowledgeBaseAI"}
+
+
 @app.on_event("startup")
 def startup_event():
     driver = get_driver()
