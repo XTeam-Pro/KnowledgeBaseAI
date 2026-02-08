@@ -1094,14 +1094,16 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             
             # Success
             break
-            
+
         except Exception as e:
             if attempt == 1: raise e
             print(f"LLM parsing error: {e}, retrying...")
             pass
-        
+
+    # Process generated data after retry loop
+    try:
         q_uid = f"Q-GEN-{uuid.uuid4().hex[:8]}"
-        
+
         options = []
         if "options" in data and isinstance(data["options"], list):
             for i, opt in enumerate(data["options"]):
