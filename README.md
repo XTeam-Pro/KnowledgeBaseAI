@@ -1,177 +1,139 @@
-# KnowledgeBaseAI — граф знаний с персонализацией (Neo4j + Flask + FastAPI)
+# KnowledgeBaseAI
 
-Единый граф базы знаний в Neo4j, веб‑интерфейс для визуализации, API для синхронизации данных, аналитики и построения персонализированных дорожных карт обучения. Глобальные статичные веса задают сложность материала, а динамичные веса обновляются по прогрессу учащихся (персонально на пользователя).
+React + TypeScript + Vite приложение для визуализации и управления графом знаний, интегрированное с ИИ-ассистентом.
 
-## Структура проекта
+## Документация
 
-```
-web_app.py              # Flask UI и REST для графа/синхронизации/аналитики
-static/js/knowledge.js  # Визуализация графа (Cytoscape)
-neo4j_utils.py          # Клиент Neo4j, синхронизация, аналитика, веса, пререквизиты, персонализация
-fastapi_app.py          # FastAPI: тесты, обновление весов, дорожные карты, пользовательские API
-kb_builder.py           # Автогенерация целей/задач и автосвязи навыков-методов
-scripts/clear_neo4j.py  # Полная очистка Neo4j (узлы/связи/индексы/констрейнты)
-kb/*.jsonl              # Источники данных (JSONL сиды)
-requirements.txt        # Зависимости (Flask, FastAPI, Neo4j и др.)
-```
+Полная документация доступна в мастер-индексе: [docs/INDEX.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/INDEX.md)
 
-## Модель графа
+Ключевые разделы:
+- Архитектура и конвейер предложений (Proposal): [ARCHITECTURE.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/ARCHITECTURE.md)
+- Каноническая спецификация графа (CANON): [CANONICAL_SPEC.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/CANONICAL_SPEC.md)
+- API справочник: [API_REFERENCE.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/API_REFERENCE.md)
+- Векторный поиск и индексация: [VECTOR_SPEC.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/VECTOR_SPEC.md)
+- Деплой: [DEPLOYMENT.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/DEPLOYMENT.md)
+- Миграция данных: [MIGRATION_GUIDE.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/MIGRATION_GUIDE.md)
+- Руководство разработчика: [DEVELOPER_GUIDE.md](file:///c:/Users/freak/TRAE/KnowledgeBaseAI/docs/DEVELOPER_GUIDE.md)
 
-- Узлы: `Subject`, `Section`, `Topic`, `Skill`, `Method`, `Goal`, `Objective`, `User`
-- Связи:
-  - `Subject-[:CONTAINS]->Section`
-  - `Section-[:CONTAINS]->Topic`
-  - `Subject-[:HAS_SKILL]->Skill`
-  - `Skill-[:LINKED]->Method` (свойства `weight`, `confidence`, `adaptive_weight`)
-  - `Topic-[:TARGETS]->(Goal|Objective)`
-  - `Topic-[:PREREQ]->Topic` (пререквизиты)
-  - `User-[:PROGRESS_TOPIC]->Topic` (персональные динамичные веса темы)
-  - `User-[:PROGRESS_SKILL]->Skill` (персональные динамичные веса навыка)
-- Веса:
-  - `static_weight` — базовая сложность (эвристика от текста/терминов)
-  - `dynamic_weight` — глобальная динамика (если пользователь не задан)
-  - пользовательские `dynamic_weight` — на связях `PROGRESS_*`
-  - `adaptive_weight` — на `LINKED` (пересчитывается из динамичного веса навыка)
+---
 
-## Быстрый старт (локально)
+## 🛠️ Запуск и Разработка
 
-- Установка зависимостей:
+Для корректной работы приложения (включая граф, поиск и ИИ) требуется запущенная инфраструктура (Neo4j, Postgres, FastAPI).
 
-  ```
-  pip install -r requirements.txt
-  ```
+### 🐳 Способ 1: Полный запуск через Docker (Рекомендуется)
 
-- Переменные окружения (Neo4j):
+Это самый быстрый способ поднять все сервисы одной командой.
 
-  ```
-  export NEO4J_URI="REDACTED_NEO4J_URI"
-  export NEO4J_USER="neo4j"
-  export NEO4J_PASSWORD="<пароль>"
-  ```
+1.  **Настройка окружения:**
+    ```bash
+    cp .env.example .env.prod
+    # Проверьте настройки в .env.prod (пароли, хосты)
+    ```
 
-- Запуск Flask UI:
+2.  **Запуск всех контейнеров:**
+    ```bash
+    docker-compose up -d --build
+    ```
 
-  ```
-  python web_app.py
-  ```
+3.  **Инициализация данных:**
+    Если база данных пуста, запустите скрипты загрузки данных внутри контейнера:
+    ```bash
+    # Загрузка графа в Neo4j
+    docker exec knowledgebase-fastapi-dev-1 python scripts/load_data.py
+    docker exec knowledgebase-fastapi-dev-1 python scripts/push_to_neo4j.py
+    ```
 
-  Откройте `http://localhost:5000/knowledge`.
+4.  **Доступ:**
+    *   Frontend: `http://localhost:5173`
+    *   Backend API: `http://localhost:8000/docs`
 
-- Запуск FastAPI:
+---
 
-  ```
-  uvicorn fastapi_app:app --host 0.0.0.0 --port 8000
-  ```
+### 💻 Способ 2: Локальная разработка фронтенда
 
-  Документация: `http://localhost:8000/docs`.
+Если бэкенд уже запущен (в Docker или удаленно), вы можете запустить фронтенд локально для быстрой HMR-разработки.
 
-## Данные и синхронизация
+1.  **Установка зависимостей:**
+    ```bash
+    cd frontend
+    npm install
+    ```
 
-- Сиды JSONL: `kb/subjects.jsonl`, `kb/sections.jsonl`, `kb/topics.jsonl`, `kb/skills.jsonl`, `kb/methods.jsonl`, `kb/skill_methods.jsonl`, `kb/topic_goals.jsonl`, `kb/topic_objectives.jsonl`.
-- Синхронизация в Neo4j:
-  - REST: `POST /api/neo4j_sync` (Flask)
-  - Python: `from neo4j_utils import sync_from_jsonl`
-- Автогенерация:
-  - Цели/задачи: `from kb_builder import generate_goals_and_objectives`
-  - Автосвязи навыков-методов: `from kb_builder import autolink_skills_methods`
+2.  **Настройка API:**
+    Убедитесь, что в коде или переменных окружения указан правильный URL бэкенда (обычно `http://localhost:8000`).
 
-## Аналитика (качество графа)
+3.  **Запуск:**
+    ```bash
+    npm run dev
+    ```
 
-- `GET /api/analysis` — возвращает агрегаты и проблемные списки:
-  - `topics_without_targets`, `skills_without_methods`, `methods_without_links`, `orphan_sections`
-  - покрытия: `topic_targets_coverage`, `skill_linkage_coverage`
+---
 
-## Визуализация (Flask UI)
+## 🧭 Эпик 2: Модуль **Explore** (просмотр и анализ графа)
 
-- `GET /knowledge` — страница визуализации графа
-- `GET /api/graph?subject_uid=...` — данные для визуализации (из Neo4j при наличии ENV)
-- CRUD для ввода через UI‑формы:
-  - `POST /api/subjects`, `/api/sections`, `/api/topics`, `/api/skills`, `/api/methods`
-  - `POST /api/topic_goals`, `/api/topic_objectives`, `/api/skill_methods`
+Explore — это страница визуального исследования графа знаний на `vis-network`, заточенная под навигацию, анализ и быстрые “точечные” действия.
 
-## FastAPI (тесты, веса, дорожные карты)
+### Как пользоваться (UX)
 
-- Глобальные обновления (без пользователя):
-  - `POST /test_result` — обновляет `dynamic_weight` темы и пересчитывает `adaptive_weight`
-  - `POST /skill_test_result` — обновляет `dynamic_weight` навыка и пересчитывает `adaptive_weight`
-- Пользовательские обновления/просмотр:
-  - `POST /test_result` с `user_id` — обновляет `User-[:PROGRESS_TOPIC]->Topic`
-  - `POST /skill_test_result` с `user_id` — обновляет `User-[:PROGRESS_SKILL]->Skill`
-  - `GET /user/knowledge_level/{user_id}/{topic_uid}`
-  - `GET /user/skill_level/{user_id}/{skill_uid}`
-- Дорожные карты:
-  - Глобальная: `POST /roadmap {subject_uid?, limit}`
-  - Персональная: `POST /user/roadmap {user_id, subject_uid?, limit}`
-- Перерасчёт связей:
-  - `POST /recompute_links` — обновляет `adaptive_weight` на `LINKED`
+- **Один клик по узлу**: открывает правый сайдбар с деталями узла.
+- **Двойной клик по узлу**: делает узел новым центром графа (перестраивает viewport).
+- **Kind**: фильтрация узлов по типу (без повторных запросов).
+- **Depth**: глубина построения viewport (влияет на объём данных).
+- **Навигация по приложению**: камера и раскладка сохраняются — можно уходить/возвращаться без потери контекста.
 
-## Пререквизиты и статичные веса
+---
 
-- `compute_static_weights()` — устанавливает `static_weight` для `Topic`/`Skill` по эвристике (длина текста, продвинутые термины), инициализирует `dynamic_weight` при необходимости.
-- `add_prereqs_heuristic()` — добавляет базовые `PREREQ` связи для ключевых тем.
+### [EXP-01] Оптимизация рендеринга `vis-network` (сохранение состояния)
 
-## Служебные утилиты
+**Что сделано**
 
-- Очистка графа: `python scripts/clear_neo4j.py` (удаляет узлы/связи/индексы/констрейнты)
+- **`GraphContext`** хранит “живое” состояние графа: `viewport`, `selectedUid`, `depth`, `camera`, `positions`.
+- На странице `ExplorePage.tsx` используется проверка **валидности контекста** (совпадают `selectedUid` и `depth`) — если валиден, **не делаем `getViewport`**.
+- Состояние камеры и позиции узлов сохраняются на `cleanup` (unmount/пересоздание сети) и восстанавливаются при возвращении:
+  - камера восстанавливается через `network.moveTo(...)` с анимацией;
+  - при восстановлении отключается стабилизация (`stabilization.enabled = !isContextValid`) и запрещён авто‑fit (`stabilization.fit = false`).
+- Для стабильности React‑эффектов применяются `useRef` (`networkRef`, `cameraRef`, `graphStateRef`), чтобы не пересоздавать сеть из‑за обновлений состояния.
 
-## Переменные окружения
+**Исправленные баги**
 
-- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` — доступ к Neo4j (обязательные)
-- `KB_DOMAIN`, `KB_ALT_DOMAIN` — домены для UI
-- `LETSENCRYPT_EMAIL` — email для Let’s Encrypt
-- `ADMIN_API_KEY` — ключ для небезопасных операций API
+- **Сброс камеры** при переходах между страницами → сохраняем `camera` в контекст и восстанавливаем через `moveTo`.
+- **Потеря раскладки** (узлы “разъезжались” заново) → сохраняем `getPositions()` и при восстановлении отключаем стабилизацию.
+- **Авто‑зум/fit от vis-network** ломал анализ → `stabilization.fit = false`, камерой управляем сами.
+- **Рывки из-за пересоздания `Network`** при обновлении камеры → камера убрана из зависимостей эффекта, чтение через `graphStateRef`.
+- **Гонка отложенного `moveTo`** при быстром уходе со страницы → блокировка отложенного вызова флагом `isMounted`.
 
-### Настройка .env
+---
 
-1. Скопируйте пример:
+### [EXP-02] Расширенная карточка узла (Sidebar/Drawer)
 
-```
-cp .env.example .env
-```
+**Что сделано**
 
-2. Отредактируйте `.env`, указав свои значения для доменов, email и подключения к Neo4j.
+- Добавлен `NodeDetailsSidebar` (drawer справа).
+- На событие `selectNode` в `vis-network` выставляется `detailsUid` → сайдбар открывается по `uid`.
+- Детали подгружаются через `useNodeDetails(uid)` → UI отрабатывает `loading/error/empty`.
+- Кнопка **“Спросить AI”** интегрирована через `toggleChat()` (открывает чат).
 
-3. Убедитесь, что DNS‑записи для доменов UI и API указывают на IP сервера.
+**Исправленные баги**
 
-### Запуск в контейнерах
+- **Повторный клик по тому же узлу не открывал сайдбар** (узел уже выделен, `selectNode` не срабатывает) → при закрытии делаем `networkRef.current?.unselectAll()`.
+- **`setState` после unmount** в загрузке деталей → в `useNodeDetails` добавлен `cancelled`‑флаг.
 
-```
-docker compose build --no-cache
-docker compose up -d
-```
+---
 
-Traefik выпустит сертификаты автоматически (HTTP‑challenge). Для HSTS/HTTPS убедитесь, что у поддоменов `api.*` есть корректные DNS записи.
+### [EXP-03] Фильтрация и “легенда” по типам (Kind)
 
-## Развертывание
+**Что сделано**
 
-- Запуск в Docker/оркестрации возможен через любой стандартный образ Python. Пробросьте `NEO4J_*` ENV и поднимите два процесса:
-  - Flask (`python web_app.py`)
-  - FastAPI (`uvicorn fastapi_app:app --host 0.0.0.0 --port 8000`)
-- Traefik/Nginx — по желанию, для маршрутизации HTTP‑трафика на порты 5000/8000. Секреты передавайте только через переменные окружения. 
+- Типы для фильтра **автоматически вычисляются из `viewport`** (уникальные `kind`), плюс опция `All`.
+- Фильтрация применяется реактивно **без повторных запросов к API**: меняется набор узлов перед `toVisData(...)`.
+- `kind` нормализован к стандарту 4.2 (`'concept' | 'skill' | 'resource'`) через `APP_CONFIG.kindMap`, с fallback на `defaultKind`.
+- Для стабильности данных:
+  - устранены дубли узлов по `uid` (через `seenIds`);
+  - добавлен перенос длинных названий в `label` и `font.multi = true`.
 
-## Примеры
+**Исправленные баги**
 
-- Синхронизация:
-
-  ```
-  curl -X POST http://localhost:5000/api/neo4j_sync
-  ```
-
-- Аналитика:
-
-  ```
-  curl http://localhost:5000/api/analysis
-  ```
-
-- Тест пользователя (персонализация):
-
-  ```
-  curl -X POST http://localhost:8000/test_result \
-    -H 'Content-Type: application/json' \
-    -d '{"topic_uid":"TOP-ALG-QUAD-EQ","score":42,"user_id":"user-001"}'
-  ```
-
-## Примечания безопасности
-
-- Не храните пароли/URI в коде и файлах репозитория. Используйте только переменные окружения.
-- Глобальные данные графа отделены от пользовательских весов: персональные динамичные веса хранятся на связях с `User` и не изменяют первичные сущности.
+- **Неизвестные типы** ломали цвета/размеры узлов → `kindMap` + fallback + проверка наличия стиля в теме.
+- **Дубли `uid`** вызывали артефакты/конфликты `id` в `vis-network` → дедупликация через `seenIds`.
+- **Длинные подписи** делали граф нечитаемым → перенос строк + `font.multi = true`.
