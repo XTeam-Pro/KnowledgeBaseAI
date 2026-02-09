@@ -1,48 +1,48 @@
-{\"uid\":\"TOP-OSNOVY-TEORII-VEROYATNOS-c8e176\",\"title\":\"Osnovy teorii veroyatnos\"}
-{\"uid\":\"TOP-OPREDELENIE-VEROYATNOSTI-f1aab2\",\"title\":\"Opredelenie veroyatnosti\"}
-{\"uid\":\"TOP-SVOISTVA-VEROYATNOSTI-51b7ce\",\"title\":\"Svoistva veroyatnosti\"}
-{\"uid\":\"TOP-SOBYTIYA-I-IH-KLASSIFIKA-97f448\",\"title\":\"Sobytiya i ih klassifika\"}
-{\"uid\":\"TOP-NEZAVISIMYE-SOBYTIYA-bdea5e\",\"title\":\"Nezavisimye sobytiya\"}
-{\"uid\":\"TOP-USLOVNAYA-VEROYATNOST-27b150\",\"title\":\"Uslovnaya veroyatnost\"}
-{\"uid\":\"TOP-FORMULA-BAIESA-e37b07\",\"title\":\"Formula baiesa\"}
-{\"uid\":\"TOP-KOMBINATORIKA-V-VEROYATN-88900f\",\"title\":\"Kombinatorika v veroyatn\"}
-{\"uid\":\"TOP-SLUCHAINYE-VELICHINY-90d9e2\",\"title\":\"Sluchainye velichiny\"}
-{\"uid\":\"TOP-RASPREDELENIE-VEROYATNOS-4c5863\",\"title\":\"Raspredelenie veroyatnos\"}
-{\"uid\":\"TOP-MATEMATICHESKOE-OZHIDANI-d5d8c8\",\"title\":\"Matematicheskoe ozhidani\"}
-{\"uid\":\"TOP-DISPERSIYA-I-STANDARTNOE-15d0f1\",\"title\":\"Dispersiya i standartnoe\"}
-{\"uid\":\"TOP-ZAKON-BOLSHIH-CHISEL-efc36b\",\"title\":\"Zakon bolshih chisel\"}
-{\"uid\":\"TOP-OSNOVNYE-PONYATIYA-STATI-2d24ef\",\"title\":\"Osnovnye ponyatiya stati\"}
-{\"uid\":\"TOP-TIPY-DANNYH-I-UROVNI-IZM-c9a86a\",\"title\":\"Tipy dannyh i urovni izm\"}
-{\"uid\":\"TOP-SBOR-DANNYH-METODY-I-INS-60afe1\",\"title\":\"Sbor dannyh metody i ins\"}
-{\"uid\":\"TOP-OPISANIE-DANNYH-MERY-CEN-4cff59\",\"title\":\"Opisanie dannyh mery cen\"}
-{\"uid\":\"TOP-OPISANIE-DANNYH-MERY-RAZ-65807e\",\"title\":\"Opisanie dannyh mery raz\"}
-{\"uid\":\"TOP-VIZUALIZACIYA-DANNYH-GRA-d211d6\",\"title\":\"Vizualizaciya dannyh gra\"}
-{\"uid\":\"TOP-KORRELYACIYA-I-REGRESSIY-43dd38\",\"title\":\"Korrelyaciya i regressiy\"}
-{\"uid\":\"TOP-PRIMENENIE-STATISTIKI-V--dcd30e\",\"title\":\"Primenenie statistiki v \"}
-{\"uid\":\"TOP-VVEDENIE-V-OPISATELNUYU--a52049\",\"title\":\"Vvedenie v opisatelnuyu \"}
-{\"uid\":\"TOP-MERY-CENTRALNOI-TENDENCI-75dcdc\",\"title\":\"Mery centralnoi tendenci\"}
-{\"uid\":\"TOP-MERY-RAZBROSA-c487ac\",\"title\":\"Mery razbrosa\"}
-{\"uid\":\"TOP-GRAFICHESKOE-PREDSTAVLEN-c2da9b\",\"title\":\"Graficheskoe predstavlen\"}
-{\"uid\":\"TOP-SVODNYE-TABLICY-c6cff5\",\"title\":\"Svodnye tablicy\"}
-{\"uid\":\"TOP-KOEFFICIENTY-ASIMMETRII--55d6ee\",\"title\":\"Koefficienty asimmetrii \"}
-{\"uid\":\"TOP-KORRELYACIONNYI-ANALIZ-d5a590\",\"title\":\"Korrelyacionnyi analiz\"}
-{\"uid\":\"TOP-NORMALNOE-RASPREDELENIE-ce0938\",\"title\":\"Normalnoe raspredelenie\"}
-{\"uid\":\"TOP-PROVERKA-GIPOTEZ-9511b6\",\"title\":\"Proverka gipotez\"}
-{\"uid\":\"TOP-VYBORKA-I-POPULYACIYA-471a66\",\"title\":\"Vyborka i populyaciya\"}
-{\"uid\":\"TOP-OSHIBKI-VYBORKI-024504\",\"title\":\"Oshibki vyborki\"}
-{\"uid\":\"TOP-INTERPRETACIYA-STATISTIC-460db0\",\"title\":\"Interpretaciya statistic\"}
-{\"uid\":\"TOP-VVEDENIE-V-VEROYATNOSTNY-e344b3\",\"title\":\"Vvedenie v veroyatnostny\"}
-{\"uid\":\"TOP-DISKRETNYE-VEROYATNOSTNY-450411\",\"title\":\"Diskretnye veroyatnostny\"}
-{\"uid\":\"TOP-NEPRERYVNYE-VEROYATNOSTN-236631\",\"title\":\"Nepreryvnye veroyatnostn\"}
-{\"uid\":\"TOP-RASPREDELENIE-BERNULLI-I-2654ca\",\"title\":\"Raspredelenie bernulli i\"}
-{\"uid\":\"TOP-RASPREDELENIE-PUASSONA-66bdaa\",\"title\":\"Raspredelenie puassona\"}
-{\"uid\":\"TOP-NORMALNOE-RASPREDELENIE-b5ffa4\",\"title\":\"Normalnoe raspredelenie\"}
-{\"uid\":\"TOP-EKSPONENCIALNOE-RASPREDE-a30410\",\"title\":\"Eksponencialnoe rasprede\"}
-{\"uid\":\"TOP-CENTRALNAYA-PREDELNAYA-T-b48f16\",\"title\":\"Centralnaya predelnaya t\"}
-{\"uid\":\"TOP-PRIMENENIE-VEROYATNOSTNY-3216ba\",\"title\":\"Primenenie veroyatnostny\"}
-{\"uid\":\"TOP-MODELIROVANIE-SLUCHAINYH-ddc404\",\"title\":\"Modelirovanie sluchainyh\"}
-{\"uid\":\"TOP-OCENKA-PARAMETROV-RASPRE-f0b295\",\"title\":\"Ocenka parametrov raspre\"}
-{\"uid\":\"TOP-TESTIROVANIE-GIPOTEZ-S-I-83526e\",\"title\":\"Testirovanie gipotez s i\"}
+{\"uid\":\"TOP-OSNOVY-TEORII-VEROYATNOS-c8e176\",\"title\":\"Основы теории вероятностей\"}
+{\"uid\":\"TOP-OPREDELENIE-VEROYATNOSTI-f1aab2\",\"title\":\"Определение вероятности\"}
+{\"uid\":\"TOP-SVOISTVA-VEROYATNOSTI-51b7ce\",\"title\":\"Свойства вероятности\"}
+{\"uid\":\"TOP-SOBYTIYA-I-IH-KLASSIFIKA-97f448\",\"title\":\"События и их классификация\"}
+{\"uid\":\"TOP-NEZAVISIMYE-SOBYTIYA-bdea5e\",\"title\":\"Независимые события\"}
+{\"uid\":\"TOP-USLOVNAYA-VEROYATNOST-27b150\",\"title\":\"Условная вероятность\"}
+{\"uid\":\"TOP-FORMULA-BAIESA-e37b07\",\"title\":\"Формула Байеса\"}
+{\"uid\":\"TOP-KOMBINATORIKA-V-VEROYATN-88900f\",\"title\":\"Комбинаторика в вероятности\"}
+{\"uid\":\"TOP-SLUCHAINYE-VELICHINY-90d9e2\",\"title\":\"Случайные величины\"}
+{\"uid\":\"TOP-RASPREDELENIE-VEROYATNOS-4c5863\",\"title\":\"Распределение вероятностей\"}
+{\"uid\":\"TOP-MATEMATICHESKOE-OZHIDANI-d5d8c8\",\"title\":\"Математическое ожидание\"}
+{\"uid\":\"TOP-DISPERSIYA-I-STANDARTNOE-15d0f1\",\"title\":\"Дисперсия и стандартное отклонение\"}
+{\"uid\":\"TOP-ZAKON-BOLSHIH-CHISEL-efc36b\",\"title\":\"Закон больших чисел\"}
+{\"uid\":\"TOP-OSNOVNYE-PONYATIYA-STATI-2d24ef\",\"title\":\"Основные понятия статистики\"}
+{\"uid\":\"TOP-TIPY-DANNYH-I-UROVNI-IZM-c9a86a\",\"title\":\"Типы данных и уровни измерений\"}
+{\"uid\":\"TOP-SBOR-DANNYH-METODY-I-INS-60afe1\",\"title\":\"Сбор данных: методы и инструменты\"}
+{\"uid\":\"TOP-OPISANIE-DANNYH-MERY-CEN-4cff59\",\"title\":\"Описание данных: меры центральной тенденции\"}
+{\"uid\":\"TOP-OPISANIE-DANNYH-MERY-RAZ-65807e\",\"title\":\"Описание данных: меры разброса\"}
+{\"uid\":\"TOP-VIZUALIZACIYA-DANNYH-GRA-d211d6\",\"title\":\"Визуализация данных: графики\"}
+{\"uid\":\"TOP-KORRELYACIYA-I-REGRESSIY-43dd38\",\"title\":\"Корреляция и регрессия\"}
+{\"uid\":\"TOP-PRIMENENIE-STATISTIKI-V--dcd30e\",\"title\":\"Применение статистики\"}
+{\"uid\":\"TOP-VVEDENIE-V-OPISATELNUYU--a52049\",\"title\":\"Введение в описательную статистику\"}
+{\"uid\":\"TOP-MERY-CENTRALNOI-TENDENCI-75dcdc\",\"title\":\"Меры центральной тенденции\"}
+{\"uid\":\"TOP-MERY-RAZBROSA-c487ac\",\"title\":\"Меры разброса\"}
+{\"uid\":\"TOP-GRAFICHESKOE-PREDSTAVLEN-c2da9b\",\"title\":\"Графическое представление данных\"}
+{\"uid\":\"TOP-SVODNYE-TABLICY-c6cff5\",\"title\":\"Сводные таблицы\"}
+{\"uid\":\"TOP-KOEFFICIENTY-ASIMMETRII--55d6ee\",\"title\":\"Коэффициенты асимметрии и эксцесса\"}
+{\"uid\":\"TOP-KORRELYACIONNYI-ANALIZ-d5a590\",\"title\":\"Корреляционный анализ\"}
+{\"uid\":\"TOP-NORMALNOE-RASPREDELENIE-ce0938\",\"title\":\"Нормальное распределение\"}
+{\"uid\":\"TOP-PROVERKA-GIPOTEZ-9511b6\",\"title\":\"Проверка гипотез\"}
+{\"uid\":\"TOP-VYBORKA-I-POPULYACIYA-471a66\",\"title\":\"Выборка и популяция\"}
+{\"uid\":\"TOP-OSHIBKI-VYBORKI-024504\",\"title\":\"Ошибки выборки\"}
+{\"uid\":\"TOP-INTERPRETACIYA-STATISTIC-460db0\",\"title\":\"Интерпретация статистики\"}
+{\"uid\":\"TOP-VVEDENIE-V-VEROYATNOSTNY-e344b3\",\"title\":\"Введение в вероятностные распределения\"}
+{\"uid\":\"TOP-DISKRETNYE-VEROYATNOSTNY-450411\",\"title\":\"Дискретные вероятностные распределения\"}
+{\"uid\":\"TOP-NEPRERYVNYE-VEROYATNOSTN-236631\",\"title\":\"Непрерывные вероятностные распределения\"}
+{\"uid\":\"TOP-RASPREDELENIE-BERNULLI-I-2654ca\",\"title\":\"Распределение Бернулли и биномиальное\"}
+{\"uid\":\"TOP-RASPREDELENIE-PUASSONA-66bdaa\",\"title\":\"Распределение Пуассона\"}
+{\"uid\":\"TOP-NORMALNOE-RASPREDELENIE-b5ffa4\",\"title\":\"Нормальное распределение\"}
+{\"uid\":\"TOP-EKSPONENCIALNOE-RASPREDE-a30410\",\"title\":\"Экспоненциальное распределение\"}
+{\"uid\":\"TOP-CENTRALNAYA-PREDELNAYA-T-b48f16\",\"title\":\"Центральная предельная теорема\"}
+{\"uid\":\"TOP-PRIMENENIE-VEROYATNOSTNY-3216ba\",\"title\":\"Применение вероятностных распределений\"}
+{\"uid\":\"TOP-MODELIROVANIE-SLUCHAINYH-ddc404\",\"title\":\"Моделирование случайных процессов\"}
+{\"uid\":\"TOP-OCENKA-PARAMETROV-RASPRE-f0b295\",\"title\":\"Оценка параметров распределений\"}
+{\"uid\":\"TOP-TESTIROVANIE-GIPOTEZ-S-I-83526e\",\"title\":\"Тестирование гипотез с использованием распределений\"}
 {\"uid\":\"TOPIC-MULT-TABLE\",\"title\":\"Таблица умножения\"}
 {\"uid\":\"TOPIC-FRACTIONS\",\"title\":\"Дроби\"}
 {\"uid\":\"TOP-VYSKAZYVANIYA-efcd74\",\"title\":\"Высказывания\"}

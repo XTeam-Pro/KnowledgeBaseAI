@@ -1,25 +1,25 @@
-{\"uid\":\"SUBSEC-LOGIKA-710db0\",\"title\":\"Логика\"}
-{\"uid\":\"SUBSEC-TEORIYA-MNOZHESTV-1a3812\",\"title\":\"Теория множеств\"}
-{\"uid\":\"SUBSEC-CHISLOVYE-SISTEMY-a4416e\",\"title\":\"Числовые системы\"}
-{\"uid\":\"SUBSEC-ARIFMETICHESKAYA-STRUKTURA-909ea5\",\"title\":\"Арифметическая структура\"}
-{\"uid\":\"SUBSEC-ALGEBRAICHESKIE-VYRAZHENIYA-ed2415\",\"title\":\"Алгебраические выражения\"}
-{\"uid\":\"SUBSEC-URAVNENIYA-22d106\",\"title\":\"Уравнения\"}
-{\"uid\":\"SUBSEC-NERAVENSTVA-66076f\",\"title\":\"Неравенства\"}
-{\"uid\":\"SUBSEC-OBSCHAYA-TEORIYA-FUNKTSIJ-34d46c\",\"title\":\"Общая теория функций\"}
-{\"uid\":\"SUBSEC-KLASSY-FUNKTSIJ-1fabe2\",\"title\":\"Классы функций\"}
-{\"uid\":\"SUBSEC-EVKLIDOVA-GEOMETRIYA-911821\",\"title\":\"Евклидова геометрия\"}
-{\"uid\":\"SUBSEC-PROSTRANSTVENNAYA-GEOMETRIYA-470f7f\",\"title\":\"Пространственная геометрия\"}
-{\"uid\":\"SUBSEC-KOORDINATNYJ-METOD-03eff2\",\"title\":\"Координатный метод\"}
-{\"uid\":\"SUBSEC-LINII-I-POVERHNOSTI-e56c8b\",\"title\":\"Линии и поверхности\"}
-{\"uid\":\"SUBSEC-OSNOVY-43feea\",\"title\":\"Основы\"}
-{\"uid\":\"SUBSEC-TOZHDESTVA-I-URAVNENIYA-af1ef2\",\"title\":\"Тождества и уравнения\"}
-{\"uid\":\"SUBSEC-KOMBINATORIKA-5b8876\",\"title\":\"Комбинаторика\"}
-{\"uid\":\"SUBSEC-VEROYATNOST-d3cd07\",\"title\":\"Вероятность\"}
-{\"uid\":\"SUBSEC-STATISTIKA---GENERAL-78ca0f\",\"title\":\"General\"}
-{\"uid\":\"SUBSEC-MATRITSY-c1cc7f\",\"title\":\"Матрицы\"}
-{\"uid\":\"SUBSEC-VEKTORNYE-PROSTRANSTVA-78e893\",\"title\":\"Векторные пространства\"}
-{\"uid\":\"SUBSEC-PREDEL-f99cf1\",\"title\":\"Предел\"}
-{\"uid\":\"SUBSEC-PROIZVODNAYA-cfd26d\",\"title\":\"Производная\"}
-{\"uid\":\"SUBSEC-INTEGRAL-666ee1\",\"title\":\"Интеграл\"}
-{\"uid\":\"SUBSEC-BULEVA-LOGIKA-2b6b3f\",\"title\":\"Булева логика\"}
-{\"uid\":\"SUBSEC-TEORIYA-GRAFOV-4685d7\",\"title\":\"Теория графов\"}
+{"uid":"SUBSEC-LOGIKA-710db0","title":"Логика"}
+{"uid":"SUBSEC-TEORIYA-MNOZHESTV-1a3812","title":"Теория множеств"}
+{"uid":"SUBSEC-CHISLOVYE-SISTEMY-a4416e","title":"Числовые системы"}
+{"uid":"SUBSEC-ARIFMETICHESKAYA-STRUKTURA-909ea5","title":"Арифметическая структура"}
+{"uid":"SUBSEC-ALGEBRAICHESKIE-VYRAZHENIYA-ed2415","title":"Алгебраические выражения"}
+{"uid":"SUBSEC-URAVNENIYA-22d106","title":"Уравнения"}
+{"uid":"SUBSEC-NERAVENSTVA-66076f","title":"Неравенства"}
+{"uid":"SUBSEC-OBSCHAYA-TEORIYA-FUNKTSIJ-34d46c","title":"Общая теория функций"}
+{"uid":"SUBSEC-KLASSY-FUNKTSIJ-1fabe2","title":"Классы функций"}
+{"uid":"SUBSEC-EVKLIDOVA-GEOMETRIYA-911821","title":"Евклидова геометрия"}
+{"uid":"SUBSEC-PROSTRANSTVENNAYA-GEOMETRIYA-470f7f","title":"Пространственная геометрия"}
+{"uid":"SUBSEC-KOORDINATNYJ-METOD-03eff2","title":"Координатный метод"}
+{"uid":"SUBSEC-LINII-I-POVERHNOSTI-e56c8b","title":"Линии и поверхности"}
+{"uid":"SUBSEC-OSNOVY-43feea","title":"Основы"}
+{"uid":"SUBSEC-TOZHDESTVA-I-URAVNENIYA-af1ef2","title":"Тождества и уравнения"}
+{"uid":"SUBSEC-KOMBINATORIKA-5b8876","title":"Комбинаторика"}
+{"uid":"SUBSEC-VEROYATNOST-d3cd07","title":"Вероятность"}
+{"uid":"SUBSEC-STATISTIKA---GENERAL-78ca0f","title":"Общая статистика"}
+{"uid":"SUBSEC-MATRITSY-c1cc7f","title":"Матрицы"}
+{"uid":"SUBSEC-VEKTORNYE-PROSTRANSTVA-78e893","title":"Векторные пространства"}
+{"uid":"SUBSEC-PREDEL-f99cf1","title":"Предел"}
+{"uid":"SUBSEC-PROIZVODNAYA-cfd26d","title":"Производная"}
+{"uid":"SUBSEC-INTEGRAL-666ee1","title":"Интеграл"}
+{"uid":"SUBSEC-BULEVA-LOGIKA-2b6b3f","title":"Булева логика"}
+{"uid":"SUBSEC-TEORIYA-GRAFOV-4685d7","title":"Теория графов"}

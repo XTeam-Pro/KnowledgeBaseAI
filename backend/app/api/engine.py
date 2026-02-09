@@ -457,6 +457,8 @@ def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: 
                 "user_class_max": int(mx) if isinstance(mx, (int, float)) else None,
                 "difficulty_band": r.get("difficulty_band") or "standard",
                 "prereq_topic_uids": [p for p in (r.get("prereq_topic_uids") or []) if p],
+                "subsection_uid": r.get("subsection_uid"),
+                "subsection_title": r.get("subsection_title"),
             })
     return results
 
@@ -521,14 +523,14 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "WITH t, collect(pre.uid) AS pre1 "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       pre1 AS prereq_topic_uids "
+                    "       null AS subsection_uid, null AS subsection_title, pre1 AS prereq_topic_uids "
                     "UNION "
-                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
+                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(ss:Subsection)-[:CONTAINS]->(t:Topic) "
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-                    "WITH t, collect(pre.uid) AS pre2 "
+                    "WITH t, ss, collect(pre.uid) AS pre2 "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       pre2 AS prereq_topic_uids"
+                    "       ss.uid AS subsection_uid, ss.title AS subsection_title, pre2 AS prereq_topic_uids"
                 ),
                 {"su": su},
             )
@@ -566,13 +568,13 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       collect(pre.uid) AS prereq_topic_uids "
+                    "       null AS subsection_uid, null AS subsection_title, collect(pre.uid) AS prereq_topic_uids "
                     "UNION "
-                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
+                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(ss:Subsection)-[:CONTAINS]->(t:Topic) "
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       collect(pre.uid) AS prereq_topic_uids"
+                    "       ss.uid AS subsection_uid, ss.title AS subsection_title, collect(pre.uid) AS prereq_topic_uids"
                 ),
                 {"su": su},
             )
@@ -590,14 +592,14 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       collect(pre.uid) AS prereq_topic_uids "
+                    "       null AS subsection_uid, null AS subsection_title, collect(pre.uid) AS prereq_topic_uids "
                     "UNION "
                     "MATCH (sub:Subject) WHERE toUpper(sub.title)=toUpper($t) "
-                    "MATCH (sub)-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
+                    "MATCH (sub)-[:CONTAINS]->(:Section)-[:CONTAINS]->(ss:Subsection)-[:CONTAINS]->(t:Topic) "
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       collect(pre.uid) AS prereq_topic_uids"
+                    "       ss.uid AS subsection_uid, ss.title AS subsection_title, collect(pre.uid) AS prereq_topic_uids"
                 ),
                 {"t": payload.subject_title},
             )
@@ -913,14 +915,42 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         if any(k in topic_title.lower() for k in visual_keywords):
             is_visual = True
 
+    # Auto-detect calculation/probability topics
+    # User feedback: Probability tasks should use free_text/numeric, not single_choice
+    is_calculation = False
+    if topic_title:
+        calc_keywords = [
+            "probability", "вероятность", "veroyatnost",
+            "combinatorics", "комбинаторика",
+            "equation", "уравнение",
+            "solve", "решить", "найдите", "calculate", "вычисли"
+        ]
+        if any(k in topic_title.lower() for k in calc_keywords):
+            is_calculation = True
+
     # 2. Choose Type
     if is_visual:
         # Prefer structured types for visual tasks to avoid "free_text" complaints
         q_types = ["single_choice", "single_choice", "numeric"]
+    elif is_calculation:
+        # Prioritize free_text/numeric for calculation tasks to prevent guessing
+        q_types = ["free_text", "free_text", "numeric"]
     else:
         q_types = ["single_choice", "single_choice", "numeric", "free_text", "boolean"]
     
     q_type = random.choice(q_types)
+
+    # Check for multiple correct answers scenarios (e.g. roots of quadratic equation)
+    # If the topic suggests multiple roots (e.g. "quadratic", "roots", "equation"),
+    # we should prefer "multiple_choice" or handle "free_text" carefully.
+    # Currently we don't have "multiple_choice" (checkboxes) in the frontend well-supported in this flow,
+    # but "single_choice" with a pair is possible (e.g. "2 and 3").
+    
+    # Heuristic: If topic implies multiple answers, ensure options reflect that or use free text.
+    # Actually, user complained: "Cornei je dva mojet byt. Variant otveta dolzhen soderzhat dva chisla"
+    # So if it's single_choice, the correct option text should be "2 and 3" (or "2; 3").
+    
+    # We will instruct the LLM to format options correctly for multiple roots.
     
     # Map difficulty int (1-10) to description
     diff_desc = "Intermediate"
@@ -1054,6 +1084,12 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     - "free_text": Open-ended question.
     - GRAMMAR: Use singular form for single objects (e.g. "Фигура A (синяя)", not "синие"). Match gender and number correctly.
     - CONSISTENCY: The question text MUST match the number of objects in the visualization. If you show 4 figures, do not say "two figures".
+    - MULTIPLE ANSWERS: If a problem has multiple valid answers (e.g. roots of a quadratic equation "x1=2, x2=3"), AND the question type is "single_choice", the correct option text MUST include ALL solutions (e.g. "2 и 3" or "2; 3"). DO NOT list only one root as the correct option if there are two.
+    - COORDINATES SYNC: If the text mentions specific coordinates (e.g. "(2, 3)"), the visualization object MUST contain a point at x=2, y=3.
+    - COORDINATE RANGE: All x, y values MUST be integers between -7 and 7.
+    - INTEGER VALUES: Points MUST use integer coordinates.
+    - GRAPH QUALITY: For curves, provide at least 5 points to ensure smooth rendering.
+    - MATH CONSISTENCY: The coordinates MUST mathematically satisfy the function mentioned (e.g. if y=2^x, point (2, 4) is valid, (2, 5) is invalid).
     
     JSON Structure:
     {json_structure}
@@ -1386,6 +1422,20 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
     if answer is None:
         return 0.0
     
+    # Helper for parsing numeric values including fractions
+    def parse_number(val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            s = str(val).strip().replace(',', '.')
+            if '/' in s:
+                parts = s.split('/')
+                if len(parts) == 2:
+                    return float(parts[0]) / float(parts[1])
+            return float(s)
+        except:
+            return None
+
     # 1. Check Single Choice (Option UIDs)
     if answer.selected_option_uids:
         if not question_data or not question_data.get("options"):
@@ -1407,20 +1457,26 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
     # 2. Check Numeric (Value)
     if answer.value is not None:
         try:
-            user_val = float(answer.value)
+            user_val = parse_number(answer.value)
+            if user_val is None:
+                return 0.0
+
             # Try to find correct value in correct_data
             correct_val = None
             if question_data and question_data.get("correct_data"):
                 cd = question_data["correct_data"]
                 if "correct_value" in cd:
-                    correct_val = float(cd["correct_value"])
+                    correct_val = parse_number(cd["correct_value"])
             
             if correct_val is not None:
-                # Allow small epsilon error
-                return 1.0 if abs(user_val - correct_val) < 1e-6 else 0.0
+                # Allow relaxed epsilon error (1% or 0.01 absolute)
+                # For 4/9 (~0.444), 0.44 should be acceptable? Maybe 0.44 is 1% off.
+                # 0.44 vs 0.4444: diff 0.0044 (~1%). 
+                # Let's use 2% relative error or 0.02 absolute for robustness
+                is_close_rel = abs(user_val - correct_val) <= 0.02 * max(abs(correct_val), 1.0)
+                is_close_abs = abs(user_val - correct_val) < 0.02
+                return 1.0 if (is_close_rel or is_close_abs) else 0.0
             
-            # Fallback if no correct value known: assume correct if non-zero? No, unsafe.
-            # But for now, let's return 0.0 if we can't verify.
             return 0.0
         except Exception:
             return 0.0
@@ -1434,22 +1490,22 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
         # Try to match with correct_value if exists
         if question_data and question_data.get("correct_data"):
             cd = question_data["correct_data"]
-            correct_text = str(cd.get("correct_value", "")).strip().lower()
-            if correct_text:
-                # Basic fuzzy match
-                if text.lower() == correct_text:
-                    return 1.0
-                # If correct answer is numeric but user sent text
-                try:
-                    if float(text) == float(correct_text):
-                        return 1.0
-                except:
-                    pass
-                return 0.0 # Mismatch
-        
-        # If no correct data available (legacy/fallback), 
-        # DO NOT return 1.0 just for length. It allows "nonsense".
-        # Return 0.0 or mark for manual review.
+            correct_val_str = str(cd.get("correct_value", "")).strip()
+            
+            # 1. Exact/Fuzzy String Match
+            if text.lower() == correct_val_str.lower():
+                return 1.0
+                
+            # 2. Numeric Comparison (Parsing fractions)
+            val_user = parse_number(text)
+            val_correct = parse_number(correct_val_str)
+            
+            if val_user is not None and val_correct is not None:
+                # Same relaxed logic as numeric
+                is_close_rel = abs(val_user - val_correct) <= 0.02 * max(abs(val_correct), 1.0)
+                is_close_abs = abs(val_user - val_correct) < 0.02
+                return 1.0 if (is_close_rel or is_close_abs) else 0.0
+                
         return 0.0
 
     return 0.0
@@ -1631,10 +1687,12 @@ async def next_question(payload: NextRequest):
                             "You are an expert tutor. Analyze the student's session history detailedly.\\n"
                             "LANGUAGE: All output text (feedback, comments, recommendations) MUST be in RUSSIAN.\\n"
                             "1. Re-evaluate every answer. BE LENIENT with formatting errors (e.g. 0.2 vs 2/10, or missing units). If the student shows understanding but failed specific format, give PARTIAL credit (0.5).\\n"
-                            "2. Calculate the precise knowledge level (0-100%) based on ACTUAL correctness. Focus on CONCEPTUAL understanding.\\n"
-                            "3. Provide a specific, constructive feedback for EACH question (why it was right/wrong).\\n"
-                            "4. Identify specific knowledge gaps (e.g. 'confuses radius and diameter').\\n"
-                            "5. Provide a tailored recommendation (NOT just 'next topic', but specific actions).\\n"
+                            "2. TRUST YOUR JUDGMENT OVER MACHINE SCORE. The 'Score' in history is strict. If user answer (e.g. '0.44') is a valid approximation of correct answer (e.g. '4/9'), treat it as CORRECT (100%).\\n"
+                            "3. Calculate the precise knowledge level (0-100%) based on ACTUAL correctness. Focus on CONCEPTUAL understanding.\\n"
+                            "4. Provide a specific, constructive feedback for EACH question (why it was right/wrong).\\n"
+                            "5. Identify specific knowledge gaps (e.g. 'confuses radius and diameter').\\n"
+                            "6. Provide a tailored recommendation (NOT just 'next topic', but specific actions).\\n"
+                            "7. Identify specific STRENGTHS (e.g. 'quick calculation', 'good conceptual grasp', 'pattern recognition').\\n"
                             "Output JSON format:\\n"
                             "{\\n"
                             "  \"questions_analytics\": [\\n"
@@ -1643,7 +1701,8 @@ async def next_question(payload: NextRequest):
                             "  \"overall_comment\": \"...\",\\n"
                             "  \"knowledge_level_percent\": 85,\\n"
                             "  \"specific_gaps\": [\"...\", \"...\"],\\n"
-                            "  \"recommendation\": \"...\"\\n"
+                            "  \"recommendation\": \"...\",\\n"
+                            "  \"strength\": \"...\"\\n"
                             "}\\n"
                             "Return ONLY JSON."
                         )
@@ -1655,7 +1714,7 @@ async def next_question(payload: NextRequest):
                              {"role": "user", "content": f"Topic: {sess.get('topic_uid')}\\n\\nHistory:\\n{history_text}"}
                         ]
                         
-                        llm_resp = await openai_chat_async(messages, temperature=0.3)
+                        llm_resp = await openai_chat_async(messages, temperature=0.5)
                         
                         if not llm_resp.get("ok"):
                              raise Exception(f"LLM Error: {llm_resp.get('error')}")
@@ -1686,7 +1745,7 @@ async def next_question(payload: NextRequest):
                     detailed_analytics = {
                         "gaps": llm_analytics.get("specific_gaps", gaps),
                         "recommended_focus": llm_analytics.get("recommendation", "Повторить теорию и пройти практику 'We Do'" if score < 0.7 else "Закрепить успех практикой"),
-                        "strength": "Хорошая скорость ответов" if score > 0.8 else "Внимательность к деталям",
+                        "strength": llm_analytics.get("strength", "Хорошая скорость ответов" if score > 0.8 else "Внимательность к деталям"),
                         "current_percentage": final_percentage,
                         "topic_breakdown": [
                             {"subtopic": "Theory", "mastery": min(100, int(final_percentage * 1.1))},
