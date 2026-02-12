@@ -530,7 +530,9 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "WITH t, ss, collect(pre.uid) AS pre2 "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       ss.uid AS subsection_uid, ss.title AS subsection_title, pre2 AS prereq_topic_uids"
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.uid END) AS subsection_uid, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.title END) AS subsection_title, "
+                    "       pre2 AS prereq_topic_uids"
                 ),
                 {"su": su},
             )
@@ -543,7 +545,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                         "WITH t, collect(pre.uid) AS pre1 "
                         "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                         "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                        "       pre1 AS prereq_topic_uids "
+                        "       null AS subsection_uid, null AS subsection_title, pre1 AS prereq_topic_uids "
                         "UNION "
                         "MATCH (sub:Subject) WHERE toUpper(sub.title)=toUpper($t) "
                         "MATCH (sub)-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
@@ -574,7 +576,9 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       ss.uid AS subsection_uid, ss.title AS subsection_title, collect(pre.uid) AS prereq_topic_uids"
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.uid END) AS subsection_uid, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.title END) AS subsection_title, "
+                    "       collect(pre.uid) AS prereq_topic_uids"
                 ),
                 {"su": su},
             )
@@ -599,7 +603,9 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       ss.uid AS subsection_uid, ss.title AS subsection_title, collect(pre.uid) AS prereq_topic_uids"
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.uid END) AS subsection_uid, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.title END) AS subsection_title, "
+                    "       collect(pre.uid) AS prereq_topic_uids"
                 ),
                 {"t": payload.subject_title},
             )
