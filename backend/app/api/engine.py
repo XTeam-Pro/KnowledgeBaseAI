@@ -1302,7 +1302,7 @@ async def start(payload: StartRequest) -> Dict:
             "last_question_uid": first_q["question_uid"],
             "good": 0,
             "bad": 0,
-            "min_questions": 6,
+            "min_questions": 7,
             "max_questions": 20,
             "target_confidence": 0.85,
             "stability_window": 4,
@@ -1400,14 +1400,26 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
     return 0.0
 
 def _confidence(sess: Dict) -> float:
-    asked = len(sess["asked"])
-    w = sess["stability_window"]
-    h = sess["d_history"][-w:] if w > 0 else sess["d_history"]
-    if not h:
+    from app.services.reasoning.bayesian_confidence import difficulty_weighted_bayesian
+
+    asked_uids = sess.get("asked", [])
+    q_details = sess.get("question_details", {})
+
+    answers = []
+    for uid in asked_uids:
+        qd = q_details.get(uid, {})
+        score = float(qd.get("score", 0.0))
+        diff = float(qd.get("difficulty", 5.0))
+        answers.append({"correct": score >= 0.5, "difficulty": diff})
+
+    if not answers:
         return 0.0
-    stable = 1.0 if max(h) - min(h) <= 1 else 0.0
-    base = min(1.0, asked / max(1, sess["min_questions"]))
-    return max(0.0, min(1.0, 0.6 * base + 0.4 * stable))
+
+    result = difficulty_weighted_bayesian(
+        answers,
+        variance_threshold=0.02,
+    )
+    return max(0.0, min(1.0, result["confidence"]))
 
 async def _next_question(sess: Dict) -> Optional[Dict]:
     good = sess["good"]
@@ -1515,6 +1527,22 @@ async def next_question(payload: NextRequest):
         
         done_by_min = len(sess["asked"]) >= sess["min_questions"] and _confidence(sess) >= sess["target_confidence"]
         done_by_max = len(sess["asked"]) >= sess["max_questions"]
+
+        # Pattern detection: extend if random guessing suspected
+        if done_by_min and not done_by_max:
+            from app.services.reasoning.pattern_detector import should_extend_assessment
+            correctness = [
+                float(sess["question_details"].get(uid, {}).get("score", 0)) >= 0.5
+                for uid in sess["asked"]
+            ]
+            pattern_check = should_extend_assessment(correctness)
+            if pattern_check["extend"]:
+                new_max = min(
+                    sess["max_questions"],
+                    len(sess["asked"]) + pattern_check["extra_questions"],
+                )
+                if len(sess["asked"]) < new_max:
+                    done_by_min = False
         async def _stream():
             try:
                 yield "event: ack\n"
@@ -1627,9 +1655,24 @@ async def next_question(payload: NextRequest):
                     # Normalized score for mastery consistency
                     normalized_score = final_percentage / 100.0
 
+                    # Build structured_gaps from question-level analysis
+                    structured_gaps = []
+                    q_details_for_gaps = sess.get("question_details", {})
+                    for uid in sess.get("asked", []):
+                        qd = q_details_for_gaps.get(uid, {})
+                        q_score = float(qd.get("score", 0.0))
+                        if q_score < 0.5:
+                            structured_gaps.append({
+                                "topic_uid": sess.get("topic_uid", ""),
+                                "question_uid": uid,
+                                "mastery_pct": int(q_score * 100),
+                                "gap_type": "conceptual" if q_score == 0.0 else "partial",
+                            })
+
                     # Detailed analytics
                     detailed_analytics = {
                         "gaps": llm_analytics.get("specific_gaps", gaps),
+                        "structured_gaps": structured_gaps,
                         "recommended_focus": llm_analytics.get("recommendation", "Повторить теорию и пройти практику 'We Do'" if score < 0.7 else "Закрепить успех практикой"),
                         "strength": "Хорошая скорость ответов" if score > 0.8 else "Внимательность к деталям",
                         "current_percentage": final_percentage,
