@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     openai_api_key: SecretStr = Field(default=SecretStr(""), alias="OPENAI_API_KEY")
 
-    neo4j_uri: str = Field(default="", alias="NEO4J_URI")
+    neo4j_uri: str = Field(default="", alias="KB_NEO4J_URI")
     neo4j_user: str = Field(default="", alias="NEO4J_USER")
     neo4j_password: SecretStr = Field(default=SecretStr(""), alias="NEO4J_PASSWORD")
 
