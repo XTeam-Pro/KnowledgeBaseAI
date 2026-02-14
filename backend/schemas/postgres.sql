@@ -1,196 +1,198 @@
--- KnowledgeBaseAI PostgreSQL schema
--- Entities: subject, section, topic, skill, method, example, error
--- Relations: strict hierarchy subject→section→topic, skills DAG per subject
-
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
--- Subjects
-CREATE TABLE IF NOT EXISTS subjects (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  uid TEXT NOT NULL UNIQUE,
+CREATE TABLE subjects (
+  uid TEXT PRIMARY KEY,
   title TEXT NOT NULL,
-  description TEXT
+  description TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Sections within a subject
-CREATE TABLE IF NOT EXISTS sections (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  uid TEXT NOT NULL UNIQUE,
-  subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE,
+CREATE TABLE sections (
+  uid TEXT PRIMARY KEY,
+  subject_uid TEXT NOT NULL REFERENCES subjects(uid) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  order_index INT NOT NULL DEFAULT 0
+);
+
+CREATE UNIQUE INDEX section_scope_title_unique ON sections(subject_uid, title);
+
+CREATE TABLE topics (
+  uid TEXT PRIMARY KEY,
+  section_uid TEXT NOT NULL REFERENCES sections(uid) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  accuracy_threshold NUMERIC,
+  critical_errors_max INT,
+  median_time_threshold_seconds INT
+);
+
+CREATE UNIQUE INDEX topic_scope_title_unique ON topics(section_uid, title);
+
+CREATE TABLE skills (
+  uid TEXT PRIMARY KEY,
+  subject_uid TEXT NOT NULL REFERENCES subjects(uid) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  definition TEXT DEFAULT '',
+  applicability_types TEXT[] DEFAULT '{}',
+  type TEXT,
+  status TEXT DEFAULT 'active'
+);
+
+CREATE UNIQUE INDEX skill_scope_title_unique ON skills(subject_uid, title);
+
+CREATE TABLE methods (
+  uid TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  method_text TEXT DEFAULT '',
+  applicability_types TEXT[] DEFAULT '{}'
+);
+
+CREATE TABLE examples (
+  uid TEXT PRIMARY KEY,
   subject_uid TEXT REFERENCES subjects(uid) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  description TEXT,
-  order_index INTEGER NOT NULL DEFAULT 0
-);
-
--- Topics within a section
-CREATE TABLE IF NOT EXISTS topics (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  uid TEXT NOT NULL UNIQUE,
-  section_id UUID REFERENCES sections(id) ON DELETE CASCADE,
-  section_uid TEXT REFERENCES sections(uid) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  description TEXT,
-  -- mastery thresholds per base_concept.md
-  accuracy_threshold NUMERIC(4,2) NOT NULL DEFAULT 0.85, -- 0..1
-  critical_errors_max INTEGER NOT NULL DEFAULT 0,
-  median_time_threshold_seconds INTEGER NOT NULL DEFAULT 600
-);
-
--- Skills within a subject (DAG via prerequisites)
-CREATE TABLE IF NOT EXISTS skills (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  uid TEXT NOT NULL UNIQUE,
-  subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE,
-  subject_uid TEXT REFERENCES subjects(uid) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  description TEXT,
-  definition TEXT,
-  applicability_types TEXT[],
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived'))
-);
-
--- Methods (can be reused across skills)
-CREATE TABLE IF NOT EXISTS methods (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  uid TEXT NOT NULL UNIQUE,
-  title TEXT NOT NULL,
-  method_text TEXT NOT NULL,
-  applicability_types TEXT[] -- optional typing per base_concept.md
-);
-
--- Examples
-CREATE TABLE IF NOT EXISTS examples (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  uid TEXT NOT NULL UNIQUE,
-  subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE,
-  subject_uid TEXT REFERENCES subjects(uid) ON DELETE CASCADE,
-  topic_id UUID REFERENCES topics(id) ON DELETE SET NULL,
   topic_uid TEXT REFERENCES topics(uid) ON DELETE SET NULL,
   title TEXT NOT NULL,
-  statement TEXT NOT NULL,
+  statement TEXT DEFAULT '',
   difficulty_level TEXT NOT NULL DEFAULT 'medium'
 );
 
--- Errors taxonomy
-CREATE TABLE IF NOT EXISTS errors (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  uid TEXT NOT NULL UNIQUE,
+CREATE TABLE errors (
+  uid TEXT PRIMARY KEY,
   title TEXT NOT NULL,
-  description TEXT,
-  error_type TEXT
+  error_text TEXT DEFAULT '',
+  triggers TEXT[] DEFAULT '{}'
 );
 
--- Relations
-
--- Topic ↔ Skill (target skills for topic)
-CREATE TABLE IF NOT EXISTS topic_skills (
-  topic_id UUID NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-  skill_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-  PRIMARY KEY (topic_id, skill_id)
+CREATE TABLE topic_skills (
+  topic_uid TEXT NOT NULL REFERENCES topics(uid) ON DELETE CASCADE,
+  skill_uid TEXT NOT NULL REFERENCES skills(uid) ON DELETE CASCADE,
+  PRIMARY KEY(topic_uid, skill_uid)
 );
 
--- Removed id-based skill_methods in favor of uid-based version below
-
-CREATE TABLE IF NOT EXISTS skill_dependencies (
-    parent_skill_uid VARCHAR(50) REFERENCES skills(uid) ON DELETE CASCADE,
-    child_skill_uid VARCHAR(50) REFERENCES skills(uid) ON DELETE CASCADE,
-    dependency_type VARCHAR(20) NOT NULL DEFAULT 'prerequisite', -- prerequisite, reinforces, extends
-    strength DECIMAL(3,2) DEFAULT 1.0, -- Сила связи от 0.0 до 1.0
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (parent_skill_uid, child_skill_uid),
-    CHECK (parent_skill_uid != child_skill_uid),
-    CHECK (strength >= 0.0 AND strength <= 1.0)
+CREATE TABLE skill_methods (
+  skill_uid TEXT NOT NULL REFERENCES skills(uid) ON DELETE CASCADE,
+  method_uid TEXT NOT NULL REFERENCES methods(uid) ON DELETE CASCADE,
+  weight TEXT NOT NULL DEFAULT 'secondary',
+  confidence NUMERIC NOT NULL DEFAULT 0.5,
+  is_auto_generated BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (skill_uid, method_uid),
+  CHECK (confidence >= 0.0 AND confidence <= 1.0),
+  CHECK (weight IN ('primary','secondary','auxiliary'))
 );
 
--- Таблица связей навыков и методов
-CREATE TABLE IF NOT EXISTS skill_methods (
-    skill_uid VARCHAR(50) REFERENCES skills(uid) ON DELETE CASCADE,
-    method_uid VARCHAR(50) REFERENCES methods(uid) ON DELETE CASCADE,
-    weight VARCHAR(20) NOT NULL DEFAULT 'secondary', -- primary, secondary, auxiliary
-    confidence DECIMAL(4,3) DEFAULT 0.5, -- Уверенность в связи от 0.0 до 1.0
-    is_auto_generated BOOLEAN DEFAULT false, -- Автоматически сгенерированная связь
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (skill_uid, method_uid),
-    CHECK (confidence >= 0.0 AND confidence <= 1.0),
-    CHECK (weight IN ('primary', 'secondary', 'auxiliary'))
+CREATE TABLE example_skills (
+  example_uid TEXT NOT NULL REFERENCES examples(uid) ON DELETE CASCADE,
+  skill_uid TEXT NOT NULL REFERENCES skills(uid) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('target','aux','context')),
+  PRIMARY KEY(example_uid, skill_uid)
 );
 
--- Example ↔ Skill with role {target, auxiliary, context}
-CREATE TABLE IF NOT EXISTS example_skills (
-  example_id UUID NOT NULL REFERENCES examples(id) ON DELETE CASCADE,
-  skill_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-  role TEXT NOT NULL CHECK (role IN ('target','auxiliary','context')),
-  UNIQUE (example_id, skill_id)
+CREATE TABLE error_skills (
+  error_uid TEXT NOT NULL REFERENCES errors(uid) ON DELETE CASCADE,
+  skill_uid TEXT NOT NULL REFERENCES skills(uid) ON DELETE CASCADE,
+  PRIMARY KEY(error_uid, skill_uid)
 );
 
--- Error ↔ Skill
-CREATE TABLE IF NOT EXISTS error_skills (
-  error_id UUID NOT NULL REFERENCES errors(id) ON DELETE CASCADE,
-  skill_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-  PRIMARY KEY (error_id, skill_id)
+CREATE TABLE error_examples (
+  error_uid TEXT NOT NULL REFERENCES errors(uid) ON DELETE CASCADE,
+  example_uid TEXT NOT NULL REFERENCES examples(uid) ON DELETE CASCADE,
+  PRIMARY KEY(error_uid, example_uid)
 );
 
--- Error ↔ Example
-CREATE TABLE IF NOT EXISTS error_examples (
-  error_id UUID NOT NULL REFERENCES errors(id) ON DELETE CASCADE,
-  example_id UUID NOT NULL REFERENCES examples(id) ON DELETE CASCADE,
-  PRIMARY KEY (error_id, example_id)
+CREATE TABLE topic_prereq (
+  topic_uid TEXT NOT NULL REFERENCES topics(uid) ON DELETE CASCADE,
+  prereq_uid TEXT NOT NULL REFERENCES topics(uid) ON DELETE CASCADE,
+  PRIMARY KEY(topic_uid, prereq_uid)
 );
 
--- Skill prerequisites (DAG per subject)
-CREATE TABLE IF NOT EXISTS skill_prerequisites (
-  subject_id UUID NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
-  skill_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-  depends_on_skill_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-  CHECK (skill_id <> depends_on_skill_id),
-  PRIMARY KEY (subject_id, skill_id, depends_on_skill_id)
-);
-
--- Ensure skills in prerequisite belong to the same subject
-CREATE OR REPLACE FUNCTION check_prereq_same_subject() RETURNS TRIGGER AS $$
-DECLARE
-  s1 UUID;
-  s2 UUID;
+CREATE OR REPLACE FUNCTION check_skill_method_applicability()
+RETURNS TRIGGER AS $$
+DECLARE s_type TEXT; m_types TEXT[];
 BEGIN
-  SELECT subject_id INTO s1 FROM skills WHERE id = NEW.skill_id;
-  SELECT subject_id INTO s2 FROM skills WHERE id = NEW.depends_on_skill_id;
-  IF s1 IS NULL OR s2 IS NULL THEN
-    RAISE EXCEPTION 'Skill IDs must exist';
-  END IF;
-  IF s1 <> NEW.subject_id OR s2 <> NEW.subject_id THEN
-    RAISE EXCEPTION 'Both skills must belong to subject %', NEW.subject_id;
+  SELECT type INTO s_type FROM skills WHERE uid = NEW.skill_uid;
+  SELECT applicability_types INTO m_types FROM methods WHERE uid = NEW.method_uid;
+  IF m_types IS NOT NULL AND cardinality(m_types) > 0 AND s_type IS NOT NULL THEN
+    IF NOT (s_type = ANY(m_types)) THEN
+      RAISE EXCEPTION 'inapplicable method type';
+    END IF;
   END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_prereq_same_subject ON skill_prerequisites;
-CREATE TRIGGER trg_prereq_same_subject
-BEFORE INSERT OR UPDATE ON skill_prerequisites
-FOR EACH ROW EXECUTE FUNCTION check_prereq_same_subject();
+DROP TRIGGER IF EXISTS trg_skill_method_applicability ON skill_methods;
+CREATE TRIGGER trg_skill_method_applicability BEFORE INSERT OR UPDATE ON skill_methods
+FOR EACH ROW EXECUTE FUNCTION check_skill_method_applicability();
 
--- DAG acyclicity check: prevent cycles in skill prerequisites within subject
-CREATE OR REPLACE FUNCTION check_skill_prerequisite_acyclic() RETURNS TRIGGER AS $$
-DECLARE
-  cycle_found BOOLEAN;
+CREATE OR REPLACE FUNCTION check_prereq_dag()
+RETURNS TRIGGER AS $$
+DECLARE has_cycle BOOLEAN;
 BEGIN
-  -- Detect path from NEW.depends_on_skill_id to NEW.skill_id
+  WITH RECURSIVE walk(uid) AS (
+    SELECT NEW.prereq_uid
+    UNION ALL
+    SELECT tp.prereq_uid FROM topic_prereq tp JOIN walk w ON tp.topic_uid = w.uid
+  )
+  SELECT EXISTS(SELECT 1 FROM walk WHERE uid = NEW.topic_uid) INTO has_cycle;
+  IF has_cycle THEN
+    RAISE EXCEPTION 'cycle detected in PREREQ';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_prereq_dag ON topic_prereq;
+CREATE TRIGGER trg_prereq_dag BEFORE INSERT OR UPDATE ON topic_prereq
+FOR EACH ROW EXECUTE FUNCTION check_prereq_dag();
+
+CREATE TABLE skill_prerequisites (
+  subject_uid TEXT NOT NULL REFERENCES subjects(uid) ON DELETE CASCADE,
+  skill_uid TEXT NOT NULL REFERENCES skills(uid) ON DELETE CASCADE,
+  depends_on_skill_uid TEXT NOT NULL REFERENCES skills(uid) ON DELETE CASCADE,
+  CHECK (skill_uid <> depends_on_skill_uid),
+  PRIMARY KEY (subject_uid, skill_uid, depends_on_skill_uid)
+);
+
+CREATE OR REPLACE FUNCTION check_skill_prereq_same_subject()
+RETURNS TRIGGER AS $$
+DECLARE s1 TEXT; s2 TEXT;
+BEGIN
+  SELECT subject_uid INTO s1 FROM skills WHERE uid = NEW.skill_uid;
+  SELECT subject_uid INTO s2 FROM skills WHERE uid = NEW.depends_on_skill_uid;
+  IF s1 IS NULL OR s2 IS NULL THEN
+    RAISE EXCEPTION 'Skill UIDs must exist';
+  END IF;
+  IF s1 <> NEW.subject_uid OR s2 <> NEW.subject_uid THEN
+    RAISE EXCEPTION 'Both skills must belong to subject %', NEW.subject_uid;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_skill_prereq_same_subject ON skill_prerequisites;
+CREATE TRIGGER trg_skill_prereq_same_subject
+BEFORE INSERT OR UPDATE ON skill_prerequisites
+FOR EACH ROW EXECUTE FUNCTION check_skill_prereq_same_subject();
+
+CREATE OR REPLACE FUNCTION check_skill_prerequisite_acyclic()
+RETURNS TRIGGER AS $$
+DECLARE cycle_found BOOLEAN;
+BEGIN
   WITH RECURSIVE reach(n) AS (
-    SELECT NEW.depends_on_skill_id
+    SELECT NEW.depends_on_skill_uid
     UNION
-    SELECT sp.depends_on_skill_id
+    SELECT sp.depends_on_skill_uid
     FROM skill_prerequisites sp
-    JOIN reach r ON sp.skill_id = r.n
-    WHERE sp.subject_id = NEW.subject_id
+    JOIN reach r ON sp.skill_uid = r.n
+    WHERE sp.subject_uid = NEW.subject_uid
   )
   SELECT EXISTS (
-    SELECT 1 FROM reach WHERE n = NEW.skill_id
+    SELECT 1 FROM reach WHERE n = NEW.skill_uid
   ) INTO cycle_found;
 
   IF cycle_found THEN
-    RAISE EXCEPTION 'Cycle detected in prerequisites for subject %: % -> %', NEW.subject_id, NEW.skill_id, NEW.depends_on_skill_id;
+    RAISE EXCEPTION 'Cycle detected in prerequisites for subject %: % -> %', NEW.subject_uid, NEW.skill_uid, NEW.depends_on_skill_uid;
   END IF;
   RETURN NEW;
 END;
@@ -201,60 +203,49 @@ CREATE TRIGGER trg_skill_prereq_acyclic
 BEFORE INSERT OR UPDATE ON skill_prerequisites
 FOR EACH ROW EXECUTE FUNCTION check_skill_prerequisite_acyclic();
 
--- Attempts (diagnostics) — optional, for mastery evaluation
-CREATE TABLE IF NOT EXISTS attempts (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  learner_id TEXT NOT NULL,
-  example_id UUID NOT NULL REFERENCES examples(id) ON DELETE CASCADE,
-  started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
-  finished_at TIMESTAMP WITH TIME ZONE,
-  time_spent_seconds INTEGER CHECK (time_spent_seconds >= 0),
-  accuracy NUMERIC(4,2) CHECK (accuracy BETWEEN 0 AND 1),
-  critical_errors_count INTEGER DEFAULT 0 CHECK (critical_errors_count >= 0)
+CREATE TABLE attempts (
+  id BIGSERIAL PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  example_uid TEXT NOT NULL REFERENCES examples(uid) ON DELETE RESTRICT,
+  source TEXT,
+  started_at TIMESTAMPTZ DEFAULT now(),
+  finished_at TIMESTAMPTZ,
+  time_spent_sec INT CHECK (time_spent_sec >= 0),
+  accuracy NUMERIC CHECK (accuracy >= 0 AND accuracy <= 1),
+  critical_errors_count INT DEFAULT 0 CHECK (critical_errors_count >= 0)
 );
 
--- Attempt ↔ Skill evaluation
-CREATE TABLE IF NOT EXISTS attempt_skill_evaluations (
-  attempt_id UUID NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-  skill_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-  role TEXT CHECK (role IN ('target','auxiliary','context')),
-  score NUMERIC(4,2) CHECK (score BETWEEN 0 AND 1),
-  PRIMARY KEY (attempt_id, skill_id)
+CREATE TABLE steps (
+  id BIGSERIAL PRIMARY KEY,
+  attempt_id BIGINT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+  step_order INT NOT NULL,
+  action TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Attempt error events
-CREATE TABLE IF NOT EXISTS attempt_error_events (
-  attempt_id UUID NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-  error_id UUID NOT NULL REFERENCES errors(id) ON DELETE CASCADE,
-  skill_id UUID REFERENCES skills(id) ON DELETE SET NULL,
-  example_id UUID REFERENCES examples(id) ON DELETE SET NULL,
-  severity TEXT NOT NULL CHECK (severity IN ('critical','minor')),
-  occurred_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+CREATE UNIQUE INDEX steps_attempt_order_unique ON steps(attempt_id, step_order);
+
+CREATE TABLE evaluations (
+  id BIGSERIAL PRIMARY KEY,
+  attempt_id BIGINT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+  skill_uid TEXT NOT NULL REFERENCES skills(uid) ON DELETE RESTRICT,
+  role TEXT NOT NULL CHECK (role IN ('target','aux','context')),
+  accuracy NUMERIC NOT NULL,
+  critical BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Helpful indexes
-CREATE INDEX IF NOT EXISTS idx_sections_subject ON sections(subject_id);
+CREATE TABLE error_events (
+  id BIGSERIAL PRIMARY KEY,
+  attempt_id BIGINT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+  error_uid TEXT NOT NULL REFERENCES errors(uid) ON DELETE RESTRICT,
+  skill_uid TEXT REFERENCES skills(uid) ON DELETE RESTRICT,
+  example_uid TEXT REFERENCES examples(uid) ON DELETE RESTRICT,
+  critical BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_sections_subject_uid ON sections(subject_uid);
-CREATE INDEX IF NOT EXISTS idx_topics_section ON topics(section_id);
 CREATE INDEX IF NOT EXISTS idx_topics_section_uid ON topics(section_uid);
-CREATE INDEX IF NOT EXISTS idx_skills_subject ON skills(subject_id);
 CREATE INDEX IF NOT EXISTS idx_skills_subject_uid ON skills(subject_uid);
-CREATE INDEX IF NOT EXISTS idx_examples_subject ON examples(subject_id);
-CREATE INDEX IF NOT EXISTS idx_examples_subject_uid ON examples(subject_uid);
 CREATE INDEX IF NOT EXISTS idx_examples_topic_uid ON examples(topic_uid);
-CREATE INDEX IF NOT EXISTS idx_example_skills_role ON example_skills(role);
-
--- Safe alterations to ensure columns exist when upgrading from older schema
-ALTER TABLE sections ADD COLUMN IF NOT EXISTS subject_uid TEXT REFERENCES subjects(uid) ON DELETE CASCADE;
-ALTER TABLE sections ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE topics ADD COLUMN IF NOT EXISTS section_uid TEXT REFERENCES sections(uid) ON DELETE CASCADE;
-ALTER TABLE skills ADD COLUMN IF NOT EXISTS subject_uid TEXT REFERENCES subjects(uid) ON DELETE CASCADE;
-ALTER TABLE skills ADD COLUMN IF NOT EXISTS applicability_types TEXT[];
-ALTER TABLE skills ADD COLUMN IF NOT EXISTS description TEXT;
-ALTER TABLE examples ADD COLUMN IF NOT EXISTS subject_uid TEXT REFERENCES subjects(uid) ON DELETE CASCADE;
-ALTER TABLE examples ADD COLUMN IF NOT EXISTS topic_uid TEXT REFERENCES topics(uid) ON DELETE SET NULL;
-ALTER TABLE examples ADD COLUMN IF NOT EXISTS difficulty_level TEXT NOT NULL DEFAULT 'medium';
-ALTER TABLE errors ADD COLUMN IF NOT EXISTS description TEXT;
-ALTER TABLE errors ADD COLUMN IF NOT EXISTS error_type TEXT;
-
--- End of schema

@@ -1103,104 +1103,59 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     
     messages = [{"role": "user", "content": prompt_text}]
     
-    try:
-        # Retry loop to enforce visual consistency
-        data = {}
-        content = ""
-        for attempt in range(2):
-            try:
-                res = await openai_chat_async(messages, temperature=0.9)
-                if not res.get("ok"):
-                     raise Exception("LLM generation failed")
-                
-                content = res.get("content", "")
-                raw_content = content
-                
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0]
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0]
-                
-                data = json.loads(content.strip())
-                
-                # Validation: check for visual references in text when is_visual is False
-                is_vis_gen = data.get("is_visual", False)
-                prompt_gen = data.get("prompt", "")
-                
-                # Regex for visual references - UPDATED: more robust, handles 'ё', clean match
-                # Pattern parts:
-                # 1. "На рисунке/чертеже/схеме..."
-                # 2. "см. рис/смотри рисунок..."
-                # 3. "изображен(о|ы|а)..." (handles ё via character class or unicode fallback, but here we explicitly list variants)
-                # 4. English "shown in figure", "see figure"
-                
-                # Note: We use [\w]* to match word endings generously.
-                visual_ref_pattern = r"(?i)(на\s+)?(рисун|чертеж|схем)[\w]*|(см\.|смотри)\s+рис[\w]*|изображ[её]н[\w]*|shown\s+in\s+(the\s+)?figure|see\s+figure"
-                has_visual_ref = bool(re.search(visual_ref_pattern, prompt_gen))
-                
-                if not is_vis_gen and has_visual_ref:
-                    if attempt < 1:
-                        print(f"Retry LLM: is_visual=False but text has visual ref: {prompt_gen[:50]}...")
-                        messages.append({"role": "assistant", "content": raw_content})
-                        messages.append({"role": "user", "content": "You set 'is_visual': false, but the text refers to a figure ('drawing', 'shown', etc.). Please regenerate the question to be PURELY textual, without any reference to an image."})
-                        continue
-                    else:
-                        # Second failure: Force clean up
-                        print("LLM failed consistency check twice. Stripping visual refs.")
-                        # Remove the visual reference phrase
-                        clean_prompt = re.sub(visual_ref_pattern, "", prompt_gen)
-                        # Clean up any double spaces or leading punctuation/spaces left behind
-                        clean_prompt = re.sub(r'\s+', ' ', clean_prompt).strip()
-                        # If start with non-capital letter (after removal), fix it
-                        if clean_prompt and clean_prompt[0].islower():
-                             clean_prompt = clean_prompt[0].upper() + clean_prompt[1:]
-                        data["prompt"] = clean_prompt
-                
-                # LABEL CONSISTENCY CHECK
-                # If is_visual=True, ensure that if the text mentions a single Latin letter (like "point A", "triangle ABC"),
-                # those labels exist in the visualization.
-                if is_vis_gen and data.get("visualization"):
-                    vis_data = data["visualization"]
-                    vis_coords = vis_data.get("coordinates", [])
-                    
-                    # 1. Collect existing labels from visualization
-                    existing_labels = set()
-                    if isinstance(vis_coords, list):
-                        for item in vis_coords:
-                            if isinstance(item, dict):
-                                lbl = item.get("label")
-                                if lbl: existing_labels.add(lbl)
-                    
-                    # 2. Extract potential labels from text (simple heuristic: capital latin letters A-Z)
-                    # We look for patterns like "точка A", "треугольник ABC", "прямая l"
-                    # For simplicity, we just find all capital single letters that look like point names.
-                    # Excluding common single letters that might be words (I, A in English). In Russian context A is fine.
-                    text_labels = set(re.findall(r'\b[A-Z]\b', prompt_gen))
-                    
-                    # Filter out likely false positives if needed (e.g. "I", "V" if roman numerals?)
-                    # For now, we assume [A-Z] are points.
-                    
-                    missing_labels = text_labels - existing_labels
-                    
-                    if missing_labels:
-                        if attempt < 1:
-                            print(f"Retry LLM: Missing labels in visualization: {missing_labels}")
-                            messages.append({"role": "assistant", "content": raw_content})
-                            messages.append({"role": "user", "content": f"The question text mentions points {list(missing_labels)}, but they are missing from the 'visualization' labels. Please add these labeled points to the visualization object."})
-                            continue
-                        else:
-                             print(f"LLM failed label consistency. Missing: {missing_labels}. Proceeding anyway to avoid loop.")
+    # Retry loop to enforce visual consistency
+    data = {}
+    content = ""
+    for attempt in range(2):
+        try:
+            res = await openai_chat_async(messages, temperature=0.9)
+            if not res.get("ok"):
+                 raise Exception("LLM generation failed")
+            
+            content = res.get("content", "")
+            raw_content = content
+            
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+            
+            data = json.loads(content.strip())
+            
+            # Validation: check for visual references in text when is_visual is False
+            is_vis_gen = data.get("is_visual", False)
+            prompt_gen = data.get("prompt", "")
+            
+            # Regex for visual references
+            visual_ref_pattern = r"(?i)(на\s+)?(рисун|чертеж|схем)(к|ке|ка|е|а|ок)|(см\.|смотри)\s+рис|изображен(ы|о|а)?|shown\s+in\s+(the\s+)?figure|see\s+figure"
+            has_visual_ref = bool(re.search(visual_ref_pattern, prompt_gen))
+            
+            if not is_vis_gen and has_visual_ref:
+                if attempt < 1:
+                    print(f"Retry LLM: is_visual=False but text has visual ref: {prompt_gen[:50]}...")
+                    messages.append({"role": "assistant", "content": raw_content})
+                    messages.append({"role": "user", "content": "You set 'is_visual': false, but the text refers to a figure ('drawing', 'shown', etc.). Please regenerate the question to be PURELY textual, without any reference to an image."})
+                    continue
+                else:
+                    # Second failure: Force clean up
+                    print("LLM failed consistency check twice. Stripping visual refs.")
+                    clean_prompt = re.sub(visual_ref_pattern, "", prompt_gen).strip()
+                    if clean_prompt:
+                         clean_prompt = clean_prompt[0].upper() + clean_prompt[1:]
+                    data["prompt"] = clean_prompt
+            
+            # Success
+            break
 
-                # Success
-                break
-                
-            except Exception as e:
-                if attempt == 1: raise e
-                print(f"LLM parsing error: {e}, retrying...")
-                pass
-        
+        except Exception as e:
+            if attempt == 1: raise e
+            print(f"LLM parsing error: {e}, retrying...")
+            pass
+
+    # Process generated data after retry loop
+    try:
         q_uid = f"Q-GEN-{uuid.uuid4().hex[:8]}"
-        
+
         options = []
         if "options" in data and isinstance(data["options"], list):
             for i, opt in enumerate(data["options"]):
@@ -1399,7 +1354,7 @@ async def start(payload: StartRequest) -> Dict:
             "last_question_uid": first_q["question_uid"],
             "good": 0,
             "bad": 0,
-            "min_questions": 6,
+            "min_questions": 7,
             "max_questions": 20,
             "target_confidence": 0.85,
             "stability_window": 4,
@@ -1517,14 +1472,26 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
     return 0.0
 
 def _confidence(sess: Dict) -> float:
-    asked = len(sess["asked"])
-    w = sess["stability_window"]
-    h = sess["d_history"][-w:] if w > 0 else sess["d_history"]
-    if not h:
+    from app.services.reasoning.bayesian_confidence import difficulty_weighted_bayesian
+
+    asked_uids = sess.get("asked", [])
+    q_details = sess.get("question_details", {})
+
+    answers = []
+    for uid in asked_uids:
+        qd = q_details.get(uid, {})
+        score = float(qd.get("score", 0.0))
+        diff = float(qd.get("difficulty", 5.0))
+        answers.append({"correct": score >= 0.5, "difficulty": diff})
+
+    if not answers:
         return 0.0
-    stable = 1.0 if max(h) - min(h) <= 1 else 0.0
-    base = min(1.0, asked / max(1, sess["min_questions"]))
-    return max(0.0, min(1.0, 0.6 * base + 0.4 * stable))
+
+    result = difficulty_weighted_bayesian(
+        answers,
+        variance_threshold=0.02,
+    )
+    return max(0.0, min(1.0, result["confidence"]))
 
 async def _next_question(sess: Dict) -> Optional[Dict]:
     good = sess["good"]
@@ -1632,6 +1599,22 @@ async def next_question(payload: NextRequest):
         
         done_by_min = len(sess["asked"]) >= sess["min_questions"] and _confidence(sess) >= sess["target_confidence"]
         done_by_max = len(sess["asked"]) >= sess["max_questions"]
+
+        # Pattern detection: extend if random guessing suspected
+        if done_by_min and not done_by_max:
+            from app.services.reasoning.pattern_detector import should_extend_assessment
+            correctness = [
+                float(sess["question_details"].get(uid, {}).get("score", 0)) >= 0.5
+                for uid in sess["asked"]
+            ]
+            pattern_check = should_extend_assessment(correctness)
+            if pattern_check["extend"]:
+                new_max = min(
+                    sess["max_questions"],
+                    len(sess["asked"]) + pattern_check["extra_questions"],
+                )
+                if len(sess["asked"]) < new_max:
+                    done_by_min = False
         async def _stream():
             try:
                 yield "event: ack\n"
@@ -1747,9 +1730,24 @@ async def next_question(payload: NextRequest):
                     # Normalized score for mastery consistency
                     normalized_score = final_percentage / 100.0
 
+                    # Build structured_gaps from question-level analysis
+                    structured_gaps = []
+                    q_details_for_gaps = sess.get("question_details", {})
+                    for uid in sess.get("asked", []):
+                        qd = q_details_for_gaps.get(uid, {})
+                        q_score = float(qd.get("score", 0.0))
+                        if q_score < 0.5:
+                            structured_gaps.append({
+                                "topic_uid": sess.get("topic_uid", ""),
+                                "question_uid": uid,
+                                "mastery_pct": int(q_score * 100),
+                                "gap_type": "conceptual" if q_score == 0.0 else "partial",
+                            })
+
                     # Detailed analytics
                     detailed_analytics = {
                         "gaps": llm_analytics.get("specific_gaps", gaps),
+                        "structured_gaps": structured_gaps,
                         "recommended_focus": llm_analytics.get("recommendation", "Повторить теорию и пройти практику 'We Do'" if score < 0.7 else "Закрепить успех практикой"),
                         "strength": llm_analytics.get("strength", "Хорошая скорость ответов" if score > 0.8 else "Внимательность к деталям"),
                         "current_percentage": final_percentage,

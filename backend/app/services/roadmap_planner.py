@@ -2,7 +2,42 @@ from typing import Dict, List
 from app.services.graph import neo4j_repo
 from app.services.curriculum.repo import get_graph_view
 
-def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int = 30, penalty_factor: float = 0.15, tenant_id: str | None = None, curriculum_code: str | None = None) -> List[Dict]:
+# Hysteresis threshold: only rebuild roadmap if mastery changed by >= 15%
+REBUILD_THRESHOLD = 0.15
+
+# In-memory cache for last roadmap per user/subject
+_roadmap_cache: Dict[str, Dict] = {}
+
+
+def should_rebuild_roadmap(
+    cache_key: str,
+    current_progress: Dict[str, float],
+) -> bool:
+    """Check if roadmap needs rebuilding based on mastery change threshold."""
+    cached = _roadmap_cache.get(cache_key)
+    if cached is None:
+        return True
+
+    old_progress = cached.get("progress", {})
+
+    # Check if any topic mastery changed by more than threshold
+    all_keys = set(old_progress.keys()) | set(current_progress.keys())
+    for key in all_keys:
+        old_val = float(old_progress.get(key, 0.0))
+        new_val = float(current_progress.get(key, 0.0))
+        if abs(new_val - old_val) >= REBUILD_THRESHOLD:
+            return True
+
+    return False
+
+
+def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int = 30, penalty_factor: float = 0.15, tenant_id: str | None = None, curriculum_code: str | None = None, force_rebuild: bool = False) -> List[Dict]:
+    # Hysteresis check
+    cache_key = f"{tenant_id or ''}:{subject_uid or ''}:{curriculum_code or ''}"
+    if not force_rebuild and not should_rebuild_roadmap(cache_key, progress):
+        cached = _roadmap_cache.get(cache_key, {})
+        if cached.get("items"):
+            return cached["items"]
     drv = neo4j_repo.get_driver()
     items: List[Dict] = []
     s = drv.session()
@@ -67,7 +102,9 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
     drv.close()
     items.sort(key=lambda x: x["priority"], reverse=True)
     if len(items) >= limit:
-        return items[:limit]
+        result = items[:limit]
+        _roadmap_cache[cache_key] = {"items": result, "progress": dict(progress)}
+        return result
     
     # Fallback search if not enough items
     if subject_uid:
@@ -136,4 +173,6 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
     for i in range(limit):
         tuid = f"TOP-STUB-{i+1}"
         fallback.append({"uid": tuid, "title": f"Стартовая тема {i+1}", "mastered": 0.0, "missing_prereqs": 0, "priority": 1.0})
-    return fallback[:limit]
+    result = fallback[:limit]
+    _roadmap_cache[cache_key] = {"items": result, "progress": dict(progress)}
+    return result

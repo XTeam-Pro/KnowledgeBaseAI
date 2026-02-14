@@ -1,0 +1,95 @@
+# Override for KnowledgeBaseAI to use StudyNinja-Eco infrastructure
+# Use existing postgres, neo4j, redis, qdrant from StudyNinja-Eco
+
+services:
+  # Define minimal stub services to satisfy depends_on
+  # Override all properties including ports
+  postgres:
+    image: busybox
+    command: ["true"]
+    restart: "no"
+    ports: !reset []
+    volumes: !reset []
+    environment: {}
+    labels: !reset []
+
+  neo4j:
+    image: busybox
+    command: ["true"]
+    restart: "no"
+    ports: !reset []
+    volumes: !reset []
+    environment: {}
+    labels: !reset []
+
+  redis:
+    image: busybox
+    command: ["true"]
+    restart: "no"
+    ports: !reset []
+    volumes: !reset []
+    environment: {}
+    labels: !reset []
+
+  qdrant:
+    image: busybox
+    command: ["true"]
+    restart: "no"
+    ports: !reset []
+    volumes: !reset []
+    environment: {}
+    labels: !reset []
+
+  adminer:
+    profiles: ["disabled"]
+
+  # Frontend dev server
+  frontend-dev:
+    networks:
+      - studyninja-network
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=https://api.kb.development.studyninja.ru
+    depends_on: []
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.kb-frontend-dev.loadbalancer.server.port=5173"
+      - "traefik.http.routers.kb-frontend-dev.rule=Host(`kb.development.studyninja.ru`)"
+      - "traefik.http.routers.kb-frontend-dev.entrypoints=websecure"
+      - "traefik.http.routers.kb-frontend-dev.tls=true"
+      - "traefik.http.routers.kb-frontend-dev.tls.certresolver=letsencrypt"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.kb-frontend-dev-http.rule=Host(`kb.development.studyninja.ru`)"
+      - "traefik.http.routers.kb-frontend-dev-http.entrypoints=web"
+      - "traefik.http.routers.kb-frontend-dev-http.middlewares=https-redirect"
+      - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+
+  # FastAPI backend dev
+  fastapi-dev:
+    networks:
+      - studyninja-network
+    environment:
+      # Use StudyNinja-Eco services
+      - NEO4J_URI=bolt://dev-neo4j-kb:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=devneo4j123
+      - PG_DSN=postgresql://postgres:devpassword123@dev-postgres:5432/knowledgebase
+      - REDIS_URL=redis://dev-redis:6379/1
+      - QDRANT_URL=http://dev-qdrant:6333
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.kb-api-dev.loadbalancer.server.port=8000"
+      - "traefik.http.routers.kb-api-dev.rule=Host(`api.kb.development.studyninja.ru`)"
+      - "traefik.http.routers.kb-api-dev.entrypoints=websecure"
+      - "traefik.http.routers.kb-api-dev.tls=true"
+      - "traefik.http.routers.kb-api-dev.tls.certresolver=letsencrypt"
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.kb-api-dev-http.rule=Host(`api.kb.development.studyninja.ru`)"
+      - "traefik.http.routers.kb-api-dev-http.entrypoints=web"
+      - "traefik.http.routers.kb-api-dev-http.middlewares=https-redirect"
+
+networks:
+  studyninja-network:
+    external: true
+    name: dev-studyninja-network

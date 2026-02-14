@@ -2,375 +2,233 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## Overview
 
-KnowledgeBaseAI is a graph-based knowledge management platform for adaptive learning, designed for the StudyNinja ecosystem. It combines a FastAPI backend with Neo4j graph database, PostgreSQL, Qdrant vector database, and a React TypeScript frontend.
+KnowledgeBaseAI is a knowledge graph visualization and AI-assisted learning platform. It combines a FastAPI backend with a React+TypeScript+Vite frontend, using Neo4j for graph storage, PostgreSQL for relational data, Qdrant for vector search, and Redis for caching/events.
 
-**Core Purpose**: Provides a stateless service for working with knowledge graphs, adaptive curriculum generation, mastery tracking, and AI-powered content generation.
+**Core concept**: The system manages a knowledge graph where nodes represent educational concepts, skills, topics, and resources. It provides adaptive learning paths (roadmaps), AI-assisted navigation, and a proposal-based system for safe graph mutations.
 
-## System Architecture
+## Tech Stack
 
-### Multi-Database Architecture
-
-The system uses three complementary databases:
-
-- **Neo4j (Graph)**: Primary knowledge graph storing subjects, topics, skills, methods, examples, and their relationships (CONTAINS, PREREQ, USES_SKILL, etc.)
-- **PostgreSQL (Relational)**: User data, authentication, mastery scores, session data, proposals system
-- **Qdrant (Vector)**: Semantic search over knowledge base entities using embeddings
-
-### Key Backend Concepts
-
-**Multi-tenancy**: The system is multi-tenant via `X-Tenant-ID` header (extracted from headers or JWT tokens). Tenant context is stored in `contextvars` and flows through all operations.
-
-**Canonical Schema**: The graph enforces a strict canonical schema defined in `backend/app/core/canonical.py`:
-- Allowed node labels: Subject, Section, Subsection, Topic, Skill, Method, Goal, Objective, Example, Error, ContentUnit, Concept, Formula, TaskType
-- Allowed edge types: CONTAINS, PREREQ, USES_SKILL, LINKED, TARGETS, HAS_EXAMPLE, HAS_UNIT, MEASURES, BASED_ON
-- All text is normalized (NFKC, whitespace normalized) before hashing
-
-**Proposals System**: All graph modifications go through a proposal workflow (create → review → commit) to ensure data quality and auditability. See `/v1/proposals` endpoints.
-
-**Unified Engine**: The `/v1/engine/*` endpoints provide the main API surface for:
-- Graph viewport/navigation
-- Roadmap generation (learning path planning)
-- Adaptive question selection
-- Next best topic recommendations
-- Mastery updates
-
-### Frontend Architecture
-
-React + TypeScript with Redux Toolkit for state management. Key libraries:
-- **vis-network**: Main graph visualization on Explore page
-- **ReactFlow**: Alternative graph editor on Edit page
-- **d3**: Visualizations and analytics
-- **react-router-dom v7**: Routing
-
-The frontend has multiple pages:
-- **Explore**: Interactive graph visualization using vis-network
-- **Edit**: Graph editing interface using ReactFlow
-- **Roadmap**: Learning path visualization
-- **Practice**: Adaptive question practice
-- **Analytics**: Graph statistics and metrics
-- **Settings**: User preferences
+**Backend**: Python 3.11+, FastAPI, Neo4j 5.26, PostgreSQL 15, Qdrant, Redis
+**Frontend**: React 19, TypeScript, Vite, vis-network, React Router, Redux Toolkit
+**Infrastructure**: Docker Compose, Traefik (reverse proxy with TLS)
 
 ## Development Commands
 
-### Environment Setup
+### Full Stack (Docker)
 
-Copy one of the environment templates and configure:
 ```bash
-cp .env.example .env.dev
-# Edit .env.dev with your configuration
-```
+# Start all services (production profile)
+docker-compose up -d --build
 
-Required environment variables:
-- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`
-- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `PG_DSN`
-- `OPENAI_API_KEY` (for AI features)
-- `JWT_SECRET_KEY`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`
-- `QDRANT_URL` (defaults to http://qdrant:6333)
-
-### Docker Compose Operations
-
-**Development mode** (with hot reload):
-```bash
+# Start dev services with hot reload
 make up-dev
-# Or explicitly:
-docker compose --env-file .env.dev --profile dev up -d traefik fastapi-dev frontend-dev frontend-prod-hot
+
+# Initialize data (first time setup)
+docker exec knowledgebase-fastapi-dev-1 python scripts/load_data.py
+docker exec knowledgebase-fastapi-dev-1 python scripts/push_to_neo4j.py
+
+# View logs
+make logs
+
+# Restart individual services
+make restart-backend
+make restart-frontend
 ```
 
-**Production mode**:
-```bash
-make up-prod
-# Or explicitly:
-docker compose --env-file .env.prod up -d traefik fastapi frontend
-```
+### Backend (Python)
 
-**Restart services**:
-```bash
-make restart-backend  # Restart FastAPI container
-make restart-frontend # Rebuild and restart frontend
-```
-
-**View logs**:
-```bash
-make logs  # Show recent logs from traefik, fastapi, frontend
-```
-
-**Individual service logs**:
-```bash
-docker logs knowledgebase-fastapi-1 -f
-docker logs knowledgebase-frontend-1 -f
-docker logs knowledgebase-neo4j-1 -f
-```
-
-### Backend Development
-
-**Install dependencies locally** (for IDE support):
 ```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
-pip install -r requirements.txt
-```
 
-**Run tests**:
-```bash
-# From project root
-pytest
+# Run tests (pytest)
+pytest                           # All tests
+pytest tests/unit               # Unit tests only
+pytest tests/integration        # Integration tests only
+pytest -k test_name             # Specific test
 
-# Run specific test file
-pytest tests/unit/test_math_ontology_builder.py
+# Run FastAPI locally (requires services running)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# Run with verbose output
-pytest -v
-
-# Run tests matching pattern
-pytest -k "test_kb_generate"
-```
-
-**Database migrations**:
-```bash
-cd backend
-# Create new migration
+# Database migrations (Alembic)
 alembic revision --autogenerate -m "description"
-
-# Apply migrations
 alembic upgrade head
-
-# Rollback one migration
 alembic downgrade -1
 ```
 
-**Manual backend run** (outside Docker):
-```bash
-cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+### Frontend (TypeScript + React)
 
-### Frontend Development
-
-**Install dependencies**:
 ```bash
 cd frontend
+
+# Install dependencies
 npm install
-```
 
-**Run development server**:
-```bash
+# Development server (HMR)
 npm run dev
-# Runs on http://localhost:5173
-```
 
-**Build for production**:
-```bash
+# Build for production
 npm run build
+
+# Run tests (Vitest)
+npm test
+
+# Lint
+npm run lint
 ```
 
-**Run tests**:
-```bash
-npm test        # Run vitest
-npm run lint    # Run ESLint
-```
+## Architecture
 
-**Preview production build**:
-```bash
-npm run preview
-```
+### Backend: Proposal-Based Graph Mutations
 
-## Key Service Modules
+**Critical**: All graph changes go through a Proposal → Review → Commit pipeline (`/v1/proposals`). Direct writes to Neo4j are prohibited outside `backend/app/workers/commit.py`.
 
-### Backend Services
+**Flow**:
+1. Client submits proposal via `POST /v1/proposals` with operations (CREATE_NODE, CREATE_RELATION, etc.)
+2. System validates canonical compliance, integrity checks (cycles, orphans, hierarchy)
+3. Proposal stored in PostgreSQL with status `draft` → `ready` → `approved`
+4. Background worker (`commit_proposal`) applies changes to Neo4j atomically
+5. Outbox pattern publishes `graph.committed` event to Redis
+6. Vector sync worker re-indexes affected entities in Qdrant
 
-- `backend/app/services/graph/`: Neo4j repository and graph operations
-  - `neo4j_repo.py`: Core Neo4j driver wrapper with retry logic
-  - `graph_service.py`: Higher-level graph operations
+**Key files**:
+- `backend/app/api/proposals.py` - API endpoints
+- `backend/app/workers/commit.py` - Commit worker
+- `backend/app/services/integrity.py` - Validation rules
+- `backend/app/core/canonical.py` - Canonical normalization
 
-- `backend/app/services/reasoning/`: Adaptive learning algorithms
-  - `gaps.py`: Knowledge gap analysis
-  - `next_best_topic.py`: Recommendation engine for next topics
-  - `mastery_update.py`: Updates user mastery scores based on performance
+### Backend: Multi-Tenancy
 
-- `backend/app/services/curriculum/`: Curriculum and roadmap generation
-  - `repo.py`: Graph queries for curriculum data
+- Header `X-Tenant-ID` required for write operations and admin endpoints
+- Context stored in `app/core/context.py` using `ContextVar`
+- All Neo4j nodes have `tenant_id` property
+- Schema versioning per tenant in PostgreSQL (`tenant_schema_version` table)
 
-- `backend/app/services/kb/`: Knowledge base content generation
-  - `builder.py`: LLM-based content generation utilities
+### Backend: Data Layer
 
-- `backend/app/services/ingestion/`: Import external content (PDF, text, TOC)
+**Neo4j** (`backend/app/services/graph/neo4j_repo.py`):
+- Stores knowledge graph: Subject → Section → Subsection → Topic hierarchy
+- Nodes: Concept, Skill, Resource, Topic, etc.
+- Relationships: PREREQ, CONTAINS, USES_SKILL, BASED_ON
+- Read-only access via `Neo4jRepo.read()`, writes via proposal system
 
-- `backend/app/services/auth/`: Authentication and user management
-  - `users_repo.py`: User CRUD operations, bootstrap admin creation
+**PostgreSQL** (`backend/app/db/pg.py`):
+- Proposals, graph version tracking, curriculum definitions, user auth
+- Outbox pattern for event publishing
 
-- `backend/app/services/vector/`: Qdrant vector database operations
+**Qdrant** (`backend/app/services/vector/qdrant_service.py`):
+- Vector embeddings for semantic search
+- Auto-syncs when graph changes (via `graph.committed` events)
 
-- `backend/app/services/visualization/`: Graph layout and geometry
-  - `geometry.py`: Coordinate system transformations, layout algorithms
+### Frontend: Graph Visualization (vis-network)
 
-### API Routers
+**Key component**: `frontend/src/pages/ExplorePage.tsx`
 
-- `backend/app/api/engine.py`: Unified engine endpoints (viewport, roadmap, questions, navigation)
-- `backend/app/api/auth.py`: Authentication (login, refresh, register)
-- `backend/app/api/proposals.py`: Proposal system for graph modifications
-- `backend/app/api/admin.py`: Admin operations (users, tenants)
-- `backend/app/api/admin_graph.py`: Graph admin operations (import, export, reset)
-- `backend/app/api/assistant.py`: AI assistant chat interface
-- `backend/app/api/analytics.py`: Graph analytics and metrics
-- `backend/app/api/ingestion.py`: Content ingestion from external sources
-- `backend/app/api/maintenance.py`: Health checks and system status
-- `backend/app/api/validation.py`: Schema validation utilities
-- `backend/app/api/ws.py`: WebSocket connections for real-time updates
+**State Management**:
+- `GraphContext` (frontend/src/context/GraphContext.tsx) stores viewport, camera position, node positions
+- On navigation away, saves camera/positions; on return, restores without re-fetching if context is valid
+- Disables vis-network auto-stabilization and fit to preserve user's view
 
-## Database Schema Migrations
+**Graph rendering**:
+- `viewport` API (`/v1/engine/viewport?center_uid=X&depth=2`) fetches subgraph
+- Filters by node `kind` (concept/skill/resource) client-side without refetch
+- Single click → sidebar with details; double click → recenter graph
 
-Migrations are managed by Alembic and run automatically on container startup via `docker-entrypoint.sh`.
+### Frontend: Routing & State
 
-**Skip migrations** (for development):
-```bash
-SKIP_MIGRATIONS=true docker compose up
-```
+- React Router for navigation (`/explore`, `/roadmap`, `/chat`)
+- Redux Toolkit for global state (user progress, mastery scores)
+- `frontend/src/api.ts` - centralized API client
 
-The entrypoint script:
-1. Waits for PostgreSQL to be ready (up to 60s)
-2. Runs `alembic upgrade head`
-3. Starts the application
+## Key Patterns & Constraints
 
-**Schema Version Gate**: `backend/app/core/migrations.py` contains `check_and_gatekeep()` which validates the database schema version on startup. If schema is incompatible, the app will refuse to start.
+### Canonical Graph Specification
 
-## Logging and Observability
+All graph operations must comply with `CANONICAL_SPEC.md` rules:
+- Node labels must be in `ALLOWED_NODE_LABELS` (Subject, Topic, Skill, etc.)
+- Edge types must be in `ALLOWED_EDGE_TYPES` (PREREQ, CONTAINS, etc.)
+- Text normalization via `backend/app/core/canonical.py::normalize_text()`
+- Deterministic JSON serialization for checksums
 
-**Structured Logging**: Uses `structlog` for JSON-formatted logs. See `backend/app/core/logging.py`.
+### Adaptive Learning Engine
 
-**Context Tracking**:
-- `X-Correlation-ID`: Traces requests across service boundaries
-- `X-Request-ID`: Unique identifier per HTTP request
-- `X-Tenant-ID`: Multi-tenant context
+**Roadmap Planning** (`backend/app/services/roadmap_planner.py`):
+- Input: user progress (dict of uid → mastery score), subject_uid
+- Output: prioritized list of topics to study next
+- Algorithm: considers prerequisites, gaps, cognitive distance
 
-**Prometheus Metrics**: Available at `/metrics` endpoint when `PROMETHEUS_ENABLED=true`.
-- `http_requests_total`: Request counter by method, path, status
-- `http_request_latency_ms`: Request latency histogram
-
-**Monitoring Stack** (optional):
-```bash
-docker compose --profile monitoring up prometheus grafana
-```
-- Prometheus: http://prom.${KB_DOMAIN}
-- Grafana: http://grafana.${KB_DOMAIN}
-
-## Coordinate System
-
-The visualization system recently changed from canvas-based to logical Cartesian coordinates:
-- Origin (0,0) is at center
-- Y-axis increases upward (mathematical convention)
-- All layout algorithms work in logical space
-- Frontend is responsible for canvas transformations
-
-See `backend/app/services/visualization/geometry.py` for coordinate utilities.
-
-## Common Development Workflows
-
-### Adding a New Graph Node Type
-
-1. Add to `ALLOWED_NODE_LABELS` in `backend/app/core/canonical.py`
-2. Create schema in `backend/app/schemas/` if needed
-3. Add validation logic if required
-4. Update frontend type definitions in `frontend/src/schemas.ts`
-
-### Adding a New API Endpoint
-
-1. Create or update router in `backend/app/api/`
-2. Define Pydantic request/response models
-3. Include router in `backend/app/main.py`
-4. Add to appropriate OpenAPI tag
-5. Update frontend API client in `frontend/src/api.ts`
-
-### Testing with Neo4j Browser
-
-Access Neo4j Browser at http://localhost:7474 (or graph.${KB_DOMAIN} in production).
-
-Useful Cypher queries:
-```cypher
-// View all node types
-MATCH (n) RETURN DISTINCT labels(n), COUNT(n)
-
-// View all relationship types
-MATCH ()-[r]->() RETURN DISTINCT type(r), COUNT(r)
-
-// View specific topic with relationships
-MATCH (t:Topic {uid: "your-topic-uid"})-[r]-(n)
-RETURN t, r, n
-
-// Check for orphaned nodes
-MATCH (n) WHERE NOT (n)--() RETURN n LIMIT 10
-```
-
-## Traefik Routing
-
-All services are proxied through Traefik with automatic HTTPS via Let's Encrypt.
-
-Service URLs (replace ${KB_DOMAIN} with your domain):
-- Frontend: https://${KB_DOMAIN}
-- API: https://api.${KB_DOMAIN}
-- Neo4j Browser: https://graph.${KB_DOMAIN}
-- Qdrant: https://qdrant.${KB_DOMAIN}
-- Adminer (PostgreSQL): https://adminer.${KB_DOMAIN}
-- Traefik Dashboard: https://traefik.${KB_DOMAIN}
-
-Alternative domain (`KB_ALT_DOMAIN`) mirrors all routes for multi-domain support.
-
-## Dependencies
-
-### Backend Key Dependencies
-- FastAPI 0.115.0: Web framework
-- Neo4j 5.23.0: Graph database driver
-- SQLAlchemy 2.0+: PostgreSQL ORM
-- Alembic 1.13+: Database migrations
-- Pydantic 2.9.2: Data validation
-- OpenAI SDK 1.52.0+: LLM integration
-- Instructor 1.5.0+: Structured outputs from LLMs
-- Qdrant Client 1.7.0+: Vector database
-- Strawberry GraphQL 0.211.0: GraphQL API (optional)
-- pytest 8.3.2: Testing framework
-
-### Frontend Key Dependencies
-- React 19.2.0
-- TypeScript 5.9.3
-- Redux Toolkit 2.11.2
-- React Router v7.9.0
-- vis-network 9.1.9: Graph visualization
-- reactflow 11.11.4: Graph editing
-- d3 7.9.0: Data visualization
-- Vite 7.2.4: Build tool
-- Vitest 4.0.16: Testing framework
-
-## Testing Strategy
-
-**Backend**: pytest-based unit tests in `tests/` directory. Focus on:
-- KB generation logic (`test_kb_generate_smart.py`)
-- Math ontology builder (`test_math_ontology_builder.py`)
-- Graph operations and canonical transformations
-
-**Frontend**: Vitest with jsdom for component and utility testing.
-
-**Configuration**: `pytest.ini` configures warning suppression for cleaner output.
-
-## Security Notes
-
-- **Authentication**: JWT-based with access and refresh tokens
-- **Multi-tenancy**: Enforced via middleware, tenant context flows through all operations
-- **Admin Bootstrap**: First admin user is created on startup from `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD`
-- **Secrets**: Use SecretStr from Pydantic for sensitive config (API keys, passwords)
-- **CORS**: Configured via `CORS_ALLOW_ORIGINS` environment variable
-
-## Known Patterns
-
-### Graph Queries
-Always use the `Neo4jRepo` class with retry logic. Direct driver usage should be avoided except in low-level utilities.
-
-### Async Operations
-FastAPI endpoints are async. Use `await` for all I/O operations including Neo4j queries (via thread pool executor), database queries, and LLM calls.
+**Assessment** (`backend/app/api/assessment.py`):
+- Adaptive question selection based on difficulty and user level
+- Bayesian mastery updates via `backend/app/services/reasoning/mastery_update.py`
 
 ### Error Handling
-Use `ApiError` from `backend/app/api/common.py` for consistent error responses. All errors include `request_id` and `correlation_id` for tracing.
 
-### LLM Calls
-Use `openai_chat_async` from `backend/app/services/kb/builder.py` for LLM interactions. It handles rate limiting, retries, and structured outputs via Instructor.
+All API errors follow standardized format (`backend/app/api/common.py::ApiError`):
+- `code`: machine-readable error code
+- `message`: human-readable description
+- `details`: optional structured data
+- `correlation_id`: for request tracing
+
+## Testing Guidelines
+
+**Backend**:
+- Unit tests mock external dependencies (Neo4j, PostgreSQL)
+- Integration tests use real databases (cleaned via `conftest.py::_clean_db` fixture)
+- Proposal tests validate entire pipeline: create → validate → commit → verify
+
+**Frontend**:
+- Vitest for unit tests
+- Mock API responses in `__tests__` directories
+
+## Environment Variables
+
+Key vars (see `.env.example`, `.env.dev`, `.env.prod`):
+- `PG_DSN`: PostgreSQL connection string
+- `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`: Neo4j credentials
+- `QDRANT_URL`: Vector DB endpoint
+- `REDIS_URL`: Redis for events/cache
+- `OPENAI_API_KEY`: For AI assistant and embeddings
+- `JWT_SECRET_KEY`: Auth token signing
+- `KB_DOMAIN`, `KB_ALT_DOMAIN`: Primary/alternate domains for Traefik routing
+
+## Important Files
+
+**Backend**:
+- `backend/app/main.py` - FastAPI app initialization, middleware, routers
+- `backend/app/api/engine.py` - Unified engine API (roadmap, viewport, pathfinding)
+- `backend/app/api/assistant.py` - AI chat assistant with tool calling
+- `backend/alembic/` - Database migration scripts
+
+**Frontend**:
+- `frontend/src/App.tsx` - Root component, routing setup
+- `frontend/src/config/appConfig.ts` - Node colors, kinds, theme
+- `frontend/src/context/GraphContext.tsx` - Graph state management
+- `frontend/src/pages/ExplorePage.tsx` - Main graph visualization
+
+## Running Migrations
+
+Backend uses Alembic for schema migrations:
+
+```bash
+# Inside backend container or with PG_DSN set
+cd backend
+alembic upgrade head        # Apply all pending migrations
+alembic current            # Check current revision
+alembic history            # View migration history
+```
+
+On first deploy, FastAPI auto-creates tables via `backend/app/db/pg.py::ensure_tables()` if `SKIP_MIGRATIONS=false`.
+
+## Deployment
+
+Production uses Docker Compose with Traefik for TLS termination. See `docker-compose.yml` profiles:
+- `prod`: Production frontend + backend
+- `dev`: Dev frontend/backend with hot reload
+- `infra`: Monitoring (Prometheus, Grafana)
+
+Access points (configured via Traefik labels):
+- Frontend: `https://${KB_DOMAIN}`
+- API: `https://api.${KB_DOMAIN}`
+- Neo4j Browser: `https://graph.${KB_DOMAIN}`
+- Qdrant: `https://qdrant.${KB_DOMAIN}` (basic auth)
