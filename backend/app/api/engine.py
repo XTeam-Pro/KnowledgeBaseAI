@@ -26,6 +26,7 @@ from app.services.questions import select_examples_for_topics
 from app.events.publisher import get_redis
 from app.services.kb.builder import openai_chat_async
 from app.services.visualization.geometry import GeometryEngine
+from app.core.logging import logger
 import random
 import uuid
 
@@ -151,6 +152,7 @@ class RoadmapNode(BaseModel):
 
 class RoadmapResponse(BaseModel):
     nodes: List[RoadmapNode]
+    personalization_mode: str = "llm"
 
 @router.post("/roadmap", summary="Build adaptive roadmap", response_model=RoadmapResponse)
 async def roadmap(payload: RoadmapRequest) -> Dict:
@@ -194,7 +196,7 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             ORDER BY (CASE WHEN dist IS NULL THEN 100 ELSE dist END) ASC, t.title ASC
             LIMIT 50
             """
-            print(f"Running roadmap query for {subject_uid} with focus {focus_uid}")
+            logger.info("roadmap_query", subject_uid=subject_uid, focus_uid=focus_uid)
             rows = repo.read(query, {"su": subject_uid, "focus": focus_uid})
         else:
             # Standard query (Alphabetical / Graph order)
@@ -208,10 +210,10 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             ORDER BY t.title ASC
             LIMIT 50
             """
-            print(f"Running roadmap query for {subject_uid}")
+            logger.info("roadmap_query", subject_uid=subject_uid)
             rows = repo.read(query, {"su": subject_uid})
             
-        print(f"Found {len(rows)} rows")
+        logger.info("roadmap_candidates", count=len(rows))
         repo.close()
 
     # 2. LLM Personalization & Description Generation
@@ -242,6 +244,7 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             "skills": r.get("skills", [])
         })
 
+    personalization_mode = "llm"
     used_llm = False
     if settings.openai_api_key and candidates_info:
         try:
@@ -289,24 +292,26 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
                         selected_rows.append(r)
                 
                 used_llm = True
-                print(f"LLM selected {len(selected_rows)} topics")
-                
+                logger.info("roadmap_llm_selected", count=len(selected_rows))
+
         except Exception as e:
-            print(f"LLM Personalization failed, falling back to default order. Error: {e}")
+            personalization_mode = "fallback"
+            logger.warning("roadmap_llm_fallback", error=str(e))
 
     # Fallback if LLM failed or returned nothing
     if not selected_rows:
+        personalization_mode = "fallback"
         # Fallback Strategy:
         # 1. Always include focus topic (dist=0)
         # 2. Then closest neighbors (dist=1)
         # 3. Then others
-        
+
         # Sort rows by distance (dist=0 first)
         def sort_key(r):
             d = r.get("dist")
             if d is None: return 100
             return d
-            
+
         sorted_rows = sorted(rows, key=sort_key)
         selected_rows = sorted_rows[:8]
     else:
@@ -345,7 +350,7 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
         ))
         count += 1
 
-    return {"nodes": topics}
+    return {"nodes": topics, "personalization_mode": personalization_mode}
 
 # --- Knowledge / Topics ---
 
@@ -783,7 +788,7 @@ def _get_session(sid: str) -> Optional[Dict]:
         val = r.get(f"sess:{sid}")
         return json.loads(val) if val else None
     except Exception as e:
-        print(f"Error getting session {sid}: {e}")
+        logger.warning("session_get_error", session_id=sid, error=str(e))
         return None
 
 def _save_session(sid: str, data: Dict) -> bool:
@@ -792,7 +797,7 @@ def _save_session(sid: str, data: Dict) -> bool:
         r.setex(f"sess:{sid}", 86400, json.dumps(data))
         return True
     except Exception as e:
-        print(f"Error saving session {sid}: {e}")
+        logger.warning("session_save_error", session_id=sid, error=str(e))
         return False
 
 def _resolve_level(uc: UserContext) -> int:
@@ -1132,13 +1137,13 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             
             if not is_vis_gen and has_visual_ref:
                 if attempt < 1:
-                    print(f"Retry LLM: is_visual=False but text has visual ref: {prompt_gen[:50]}...")
+                    logger.info("llm_retry_visual_ref", prompt_preview=prompt_gen[:50])
                     messages.append({"role": "assistant", "content": raw_content})
                     messages.append({"role": "user", "content": "You set 'is_visual': false, but the text refers to a figure ('drawing', 'shown', etc.). Please regenerate the question to be PURELY textual, without any reference to an image."})
                     continue
                 else:
                     # Second failure: Force clean up
-                    print("LLM failed consistency check twice. Stripping visual refs.")
+                    logger.warning("llm_visual_consistency_failed", action="stripping_refs")
                     clean_prompt = re.sub(visual_ref_pattern, "", prompt_gen).strip()
                     if clean_prompt:
                          clean_prompt = clean_prompt[0].upper() + clean_prompt[1:]
@@ -1149,7 +1154,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
 
         except Exception as e:
             if attempt == 1: raise e
-            print(f"LLM parsing error: {e}, retrying...")
+            logger.warning("llm_parsing_error", error=str(e), action="retrying")
             pass
 
     # Process generated data after retry loop
@@ -1206,7 +1211,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                         vis["coordinates"] = normalized_coords
                         
                     except Exception as geo_err:
-                        print(f"GeometryEngine error (using original coords): {geo_err}")
+                        logger.warning("geometry_engine_error", error=str(geo_err), action="using_original_coords")
                         # If normalization fails, we attempt to use original coordinates if they are somewhat valid
                         pass
 
@@ -1219,7 +1224,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 # Convert to dict for JSON serialization compatibility
                 visualization_data = vis_obj.model_dump() if hasattr(vis_obj, "model_dump") else vis_obj.dict()
             except Exception as e:
-                print(f"Visualization validation error: {e}")
+                logger.warning("visualization_validation_error", error=str(e))
                 # Fallback: ignore visualization if invalid
                 visualization_data = None
         
@@ -1259,7 +1264,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
 
         return res_q
     except Exception as e:
-        print(f"Gen Error: {e}")
+        logger.warning("question_generation_error", error=str(e))
         # If generation fails, we raise an error instead of returning a stub
         raise HTTPException(status_code=503, detail="Unable to generate question at this time.")
 
@@ -1523,7 +1528,7 @@ async def _next_question(sess: Dict) -> Optional[Dict]:
         previous_prompts = sess.get("asked_prompts", [])
         q = await _select_question(sess["topic_uid"], d, d, set(sess["asked"]), previous_prompts=previous_prompts)
     except Exception as e:
-        print(f"Error selecting question: {e}")
+        logger.warning("question_selection_error", error=str(e))
         # Try fallback to standard difficulty if specific difficulty fails
         try:
             previous_prompts = sess.get("asked_prompts", [])
@@ -1592,10 +1597,10 @@ async def next_question(payload: NextRequest):
                 sess["question_details"][payload.question_uid]["user_answer"] = ans_dict
                 sess["question_details"][payload.question_uid]["score"] = score
             except Exception as e:
-                print(f"Error saving answer: {e}")
+                logger.warning("answer_save_error", error=str(e))
 
         if not _save_session(sid, sess):
-            print(f"Warning: Failed to save session {sid} in next_question")
+            logger.warning("session_save_failed_next", session_id=sid)
         
         done_by_min = len(sess["asked"]) >= sess["min_questions"] and _confidence(sess) >= sess["target_confidence"]
         done_by_max = len(sess["asked"]) >= sess["max_questions"]
@@ -1717,7 +1722,7 @@ async def next_question(payload: NextRequest):
                         
                         llm_analytics = json.loads(content_str)
                     except Exception as e:
-                        print(f"LLM Analytics failed: {e}")
+                        logger.warning("llm_analytics_failed", error=str(e))
                         import traceback
                         traceback.print_exc()
                         # Fallback
@@ -1781,7 +1786,7 @@ async def next_question(payload: NextRequest):
                     yield "data: {\"error\": \"Unable to generate next question\"}\n\n"
                     return
                 if not _save_session(sid, sess): # Save updated session after selecting next question
-                    print(f"Warning: Failed to save session {sid} after selecting next question")
+                    logger.warning("session_save_failed_after_next", session_id=sid)
                 yield "event: question\n"
                 yield "data: " + json.dumps({"is_completed": False, "items":[q], "meta": {}}, ensure_ascii=False) + "\n\n"
             except Exception as e:
