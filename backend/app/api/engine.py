@@ -8,7 +8,7 @@ import re
 from app.services.graph.neo4j_repo import relation_context, neighbors, get_node_details, get_driver, Neo4jRepo
 from app.config.settings import settings
 from app.services.roadmap_planner import plan_route
-from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples
+from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples, select_test_out_questions
 from app.api.common import ApiError, StandardResponse
 from app.core.context import get_tenant_id
 from app.schemas.roadmap import RoadmapRequest
@@ -62,6 +62,113 @@ async def get_node(uid: str) -> Dict:
 async def viewport(center_uid: str, depth: int = 1) -> Dict:
     ns, es = neighbors(center_uid, depth=depth, tenant_id=get_tenant_id())
     return {"items": ns, "meta": {"edges": es, "center_uid": center_uid, "depth": depth}}
+
+
+class ViewportAdvancedRequest(BaseModel):
+    center_uid: str
+    depth: int = Field(default=3, ge=1, le=10)
+    filter_by_mastery: bool = False
+    filter_by_difficulty_min: Optional[int] = None
+    filter_by_difficulty_max: Optional[int] = None
+    show_cross_domain: bool = False
+    student_tier: str = "standard"
+    progress: Dict[str, float] = Field(default_factory=dict)
+
+
+@router.post("/viewport-advanced", response_model=StandardResponse)
+async def viewport_advanced(payload: ViewportAdvancedRequest) -> Dict:
+    """Advanced viewport for advanced/gifted/olympiad students.
+
+    Returns full subgraph with enriched metadata (difficulty, mastery_tier, olympiad_flag).
+    """
+    tenant_id = get_tenant_id()
+    depth = min(payload.depth, 10)
+
+    # Build Cypher query with optional BRIDGES_TO edges
+    rel_types = "PREREQ|CONTAINS|REQUIRES_SKILL"
+    if payload.show_cross_domain:
+        rel_types += "|BRIDGES_TO"
+
+    repo = Neo4jRepo()
+    query = (
+        f"MATCH p=(c {{uid:$uid}})-[:{rel_types}*0..{depth}]-(n) "
+        "WHERE ($tid IS NULL OR c.tenant_id = $tid) "
+        "RETURN DISTINCT n, labels(n) AS node_labels, "
+        "coalesce(n.difficulty_level, 5) AS difficulty_level, "
+        "coalesce(n.olympiad_flag, false) AS olympiad_flag"
+    )
+    rows = repo.read(query, {"uid": payload.center_uid, "tid": tenant_id})
+
+    # Fetch edges separately
+    edge_query = (
+        f"MATCH (c {{uid:$uid}})-[:{rel_types}*0..{depth}]-(a) "
+        f"WITH collect(DISTINCT a) AS ns "
+        f"UNWIND ns AS a "
+        f"MATCH (a)-[r]->(b) WHERE b IN ns "
+        f"RETURN DISTINCT a.uid AS source, b.uid AS target, type(r) AS kind"
+    )
+    edge_rows = repo.read(edge_query, {"uid": payload.center_uid, "tid": tenant_id})
+    repo.close()
+
+    nodes = []
+    for r in rows:
+        n = r.get("n", {})
+        if isinstance(n, dict):
+            n_props = n
+        else:
+            n_props = dict(n) if hasattr(n, '__iter__') else {}
+
+        uid = n_props.get("uid", "")
+        if not uid:
+            continue
+
+        difficulty = int(r.get("difficulty_level", 5))
+        mastery = payload.progress.get(uid, 0.0)
+
+        # Apply filters
+        if payload.filter_by_mastery and mastery >= 0.85:
+            continue
+        if payload.filter_by_difficulty_min is not None and difficulty < payload.filter_by_difficulty_min:
+            continue
+        if payload.filter_by_difficulty_max is not None and difficulty > payload.filter_by_difficulty_max:
+            continue
+
+        # Compute mastery_tier
+        if mastery >= 0.85:
+            mastery_tier = "mastered"
+        elif mastery >= 0.5:
+            mastery_tier = "progressing"
+        elif mastery > 0:
+            mastery_tier = "learning"
+        else:
+            mastery_tier = "unstarted"
+
+        nodes.append({
+            "uid": uid,
+            "title": n_props.get("title", ""),
+            "labels": list(r.get("node_labels", [])),
+            "difficulty_level": difficulty,
+            "mastery": mastery,
+            "mastery_tier": mastery_tier,
+            "olympiad_flag": bool(r.get("olympiad_flag", False)),
+        })
+
+    edges = [
+        {"source": e["source"], "target": e["target"], "kind": e["kind"]}
+        for e in edge_rows if e.get("source") and e.get("target")
+    ]
+
+    return {
+        "items": nodes,
+        "meta": {
+            "edges": edges,
+            "center_uid": payload.center_uid,
+            "depth": depth,
+            "student_tier": payload.student_tier,
+            "total_nodes": len(nodes),
+        },
+    }
+
 
 class PathfindInput(BaseModel):
     target_uid: str
@@ -403,54 +510,64 @@ def _age_to_class(age: Optional[int]) -> int:
         return 11
     return a - 6
 
-def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: TopicsAvailableRequest, resolved: int) -> List[Dict]:
+def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: TopicsAvailableRequest, resolved: int, student_tier: str = "standard") -> List[Dict]:
     results = []
     for r in rows or []:
         mn = r.get("user_class_min")
         mx = r.get("user_class_max")
-        
+
         include = True
-        
+
         # Curriculum Whitelist Check
         if allowed_topics is not None and r.get("topic_uid") not in allowed_topics:
             include = False
-        
+
         if include:
             # Goal / Class Filtering
-            
+
             try:
                 mn_val = int(mn) if mn is not None else None
                 mx_val = int(mx) if mx is not None else None
-                
+
                 is_exam = payload.goal_type == GoalType.exam
-                
-                if is_exam:
-                    # Memory 01KG0022Y97B03DEJ3W11AA854: 
+
+                # Olympiad tier: no grade restrictions at all
+                if student_tier == "olympiad":
+                    pass  # skip all grade-based filtering
+                elif is_exam:
+                    # Memory 01KG0022Y97B03DEJ3W11AA854:
                     # Filters topics by curriculum grade limits for exams (OGE<=9, EGE<=11).
                     exam_limit = 11 # Default to 11
                     if payload.exam_type == ExamType.oge:
                         exam_limit = 9
-                    
+
+                    # Advanced/gifted: allow higher exam topics (+2 grades)
+                    if student_tier in ("advanced", "gifted"):
+                        exam_limit = min(exam_limit + 2, 11)
+
                     # Filter 1: Exclude topics that start AFTER the exam limit
                     if mn_val is not None and mn_val > exam_limit:
                         include = False
-                    
+
                     # Filter 2: Exclude topics that start AFTER the user's current class
                     # (Prevent 3rd grader from seeing 7th grade topics, even if for OGE)
                     # Skip this check if resolved class is 0 (undefined/admin)
                     if mn_val is not None and resolved > 0 and resolved < mn_val:
                         include = False
-                        
+
                     # Note: We intentionally ALLOW topics where resolved > mx_val (Reviewing past material)
-                    
+
                 else:
                     # Default logic (study_topics, homework, improve_grade)
                     # Filters topics by user class
                     if mn_val is not None and resolved > 0 and resolved < mn_val:
                         include = False
-                    if mx_val is not None and resolved > 0 and resolved > mx_val:
-                        include = False
-                        
+                    if mx_val is not None and resolved > 0:
+                        # Advanced/gifted: allow +2 grades above current level
+                        grade_buffer = 2 if student_tier in ("advanced", "gifted") else 0
+                        if resolved > mx_val + grade_buffer:
+                            include = False
+
             except (ValueError, TypeError):
                 pass
         
@@ -481,7 +598,10 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
         age = ctx.attributes.get("age")
     
     resolved = int(user_class) if user_class is not None else _age_to_class(age)
-    
+
+    # Extract student tier for ability-based filtering
+    student_tier = (ctx.attributes or {}).get("student_tier", "standard")
+
     # Curriculum Filter Preparation
     allowed_topics: Optional[Set[str]] = None
     if payload.curriculum_code:
@@ -562,7 +682,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     ),
                     {"t": payload.subject_title},
                 )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             topics = []
@@ -587,7 +707,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                 ),
                 {"su": su},
             )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             ...
@@ -614,7 +734,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                 ),
                 {"t": payload.subject_title},
             )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             ...
@@ -657,6 +777,28 @@ async def adaptive_questions(payload: AdaptiveQuestionsInput) -> Dict:
         tenant_id=tid,
     )
     return {"items": examples, "meta": {}}
+
+# --- Test-Out Questions ---
+
+class TestOutQuestionsInput(BaseModel):
+    topic_uid: str
+    difficulty_min: int = 7
+    limit: int = 5
+
+@router.post("/test-out-questions", summary="Get high-difficulty questions for test-out", response_model=StandardResponse)
+async def test_out_questions(payload: TestOutQuestionsInput) -> Dict:
+    """Select high-difficulty questions for test-out assessment.
+
+    Used by advanced students to prove topic mastery and skip ahead.
+    """
+    tid = get_tenant_id()
+    questions = select_test_out_questions(
+        topic_uid=payload.topic_uid,
+        difficulty_min=payload.difficulty_min,
+        limit=payload.limit,
+        tenant_id=tid,
+    )
+    return {"items": questions, "meta": {"topic_uid": payload.topic_uid, "difficulty_min": payload.difficulty_min}}
 
 # --- Reasoning / Gaps ---
 
