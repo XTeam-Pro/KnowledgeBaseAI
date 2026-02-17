@@ -8,7 +8,7 @@ import re
 from app.services.graph.neo4j_repo import relation_context, neighbors, get_node_details, get_driver, Neo4jRepo
 from app.config.settings import settings
 from app.services.roadmap_planner import plan_route
-from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples
+from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples, select_test_out_questions
 from app.api.common import ApiError, StandardResponse
 from app.core.context import get_tenant_id
 from app.schemas.roadmap import RoadmapRequest
@@ -26,6 +26,7 @@ from app.services.questions import select_examples_for_topics
 from app.events.publisher import get_redis
 from app.services.kb.builder import openai_chat_async
 from app.services.visualization.geometry import GeometryEngine
+from app.core.logging import logger
 import random
 import uuid
 
@@ -61,6 +62,113 @@ async def get_node(uid: str) -> Dict:
 async def viewport(center_uid: str, depth: int = 1) -> Dict:
     ns, es = neighbors(center_uid, depth=depth, tenant_id=get_tenant_id())
     return {"items": ns, "meta": {"edges": es, "center_uid": center_uid, "depth": depth}}
+
+
+class ViewportAdvancedRequest(BaseModel):
+    center_uid: str
+    depth: int = Field(default=3, ge=1, le=10)
+    filter_by_mastery: bool = False
+    filter_by_difficulty_min: Optional[int] = None
+    filter_by_difficulty_max: Optional[int] = None
+    show_cross_domain: bool = False
+    student_tier: str = "standard"
+    progress: Dict[str, float] = Field(default_factory=dict)
+
+
+@router.post("/viewport-advanced", response_model=StandardResponse)
+async def viewport_advanced(payload: ViewportAdvancedRequest) -> Dict:
+    """Advanced viewport for advanced/gifted/olympiad students.
+
+    Returns full subgraph with enriched metadata (difficulty, mastery_tier, olympiad_flag).
+    """
+    tenant_id = get_tenant_id()
+    depth = min(payload.depth, 10)
+
+    # Build Cypher query with optional BRIDGES_TO edges
+    rel_types = "PREREQ|CONTAINS|REQUIRES_SKILL"
+    if payload.show_cross_domain:
+        rel_types += "|BRIDGES_TO"
+
+    repo = Neo4jRepo()
+    query = (
+        f"MATCH p=(c {{uid:$uid}})-[:{rel_types}*0..{depth}]-(n) "
+        "WHERE ($tid IS NULL OR c.tenant_id = $tid) "
+        "RETURN DISTINCT n, labels(n) AS node_labels, "
+        "coalesce(n.difficulty_level, 5) AS difficulty_level, "
+        "coalesce(n.olympiad_flag, false) AS olympiad_flag"
+    )
+    rows = repo.read(query, {"uid": payload.center_uid, "tid": tenant_id})
+
+    # Fetch edges separately
+    edge_query = (
+        f"MATCH (c {{uid:$uid}})-[:{rel_types}*0..{depth}]-(a) "
+        f"WITH collect(DISTINCT a) AS ns "
+        f"UNWIND ns AS a "
+        f"MATCH (a)-[r]->(b) WHERE b IN ns "
+        f"RETURN DISTINCT a.uid AS source, b.uid AS target, type(r) AS kind"
+    )
+    edge_rows = repo.read(edge_query, {"uid": payload.center_uid, "tid": tenant_id})
+    repo.close()
+
+    nodes = []
+    for r in rows:
+        n = r.get("n", {})
+        if isinstance(n, dict):
+            n_props = n
+        else:
+            n_props = dict(n) if hasattr(n, '__iter__') else {}
+
+        uid = n_props.get("uid", "")
+        if not uid:
+            continue
+
+        difficulty = int(r.get("difficulty_level", 5))
+        mastery = payload.progress.get(uid, 0.0)
+
+        # Apply filters
+        if payload.filter_by_mastery and mastery >= 0.85:
+            continue
+        if payload.filter_by_difficulty_min is not None and difficulty < payload.filter_by_difficulty_min:
+            continue
+        if payload.filter_by_difficulty_max is not None and difficulty > payload.filter_by_difficulty_max:
+            continue
+
+        # Compute mastery_tier
+        if mastery >= 0.85:
+            mastery_tier = "mastered"
+        elif mastery >= 0.5:
+            mastery_tier = "progressing"
+        elif mastery > 0:
+            mastery_tier = "learning"
+        else:
+            mastery_tier = "unstarted"
+
+        nodes.append({
+            "uid": uid,
+            "title": n_props.get("title", ""),
+            "labels": list(r.get("node_labels", [])),
+            "difficulty_level": difficulty,
+            "mastery": mastery,
+            "mastery_tier": mastery_tier,
+            "olympiad_flag": bool(r.get("olympiad_flag", False)),
+        })
+
+    edges = [
+        {"source": e["source"], "target": e["target"], "kind": e["kind"]}
+        for e in edge_rows if e.get("source") and e.get("target")
+    ]
+
+    return {
+        "items": nodes,
+        "meta": {
+            "edges": edges,
+            "center_uid": payload.center_uid,
+            "depth": depth,
+            "student_tier": payload.student_tier,
+            "total_nodes": len(nodes),
+        },
+    }
+
 
 class PathfindInput(BaseModel):
     target_uid: str
@@ -151,6 +259,7 @@ class RoadmapNode(BaseModel):
 
 class RoadmapResponse(BaseModel):
     nodes: List[RoadmapNode]
+    personalization_mode: str = "llm"
 
 @router.post("/roadmap", summary="Build adaptive roadmap", response_model=RoadmapResponse)
 async def roadmap(payload: RoadmapRequest) -> Dict:
@@ -194,7 +303,7 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             ORDER BY (CASE WHEN dist IS NULL THEN 100 ELSE dist END) ASC, t.title ASC
             LIMIT 50
             """
-            print(f"Running roadmap query for {subject_uid} with focus {focus_uid}")
+            logger.info("roadmap_query", subject_uid=subject_uid, focus_uid=focus_uid)
             rows = repo.read(query, {"su": subject_uid, "focus": focus_uid})
         else:
             # Standard query (Alphabetical / Graph order)
@@ -208,10 +317,10 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             ORDER BY t.title ASC
             LIMIT 50
             """
-            print(f"Running roadmap query for {subject_uid}")
+            logger.info("roadmap_query", subject_uid=subject_uid)
             rows = repo.read(query, {"su": subject_uid})
             
-        print(f"Found {len(rows)} rows")
+        logger.info("roadmap_candidates", count=len(rows))
         repo.close()
 
     # 2. LLM Personalization & Description Generation
@@ -242,6 +351,7 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             "skills": r.get("skills", [])
         })
 
+    personalization_mode = "llm"
     used_llm = False
     if settings.openai_api_key and candidates_info:
         try:
@@ -289,24 +399,26 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
                         selected_rows.append(r)
                 
                 used_llm = True
-                print(f"LLM selected {len(selected_rows)} topics")
-                
+                logger.info("roadmap_llm_selected", count=len(selected_rows))
+
         except Exception as e:
-            print(f"LLM Personalization failed, falling back to default order. Error: {e}")
+            personalization_mode = "fallback"
+            logger.warning("roadmap_llm_fallback", error=str(e))
 
     # Fallback if LLM failed or returned nothing
     if not selected_rows:
+        personalization_mode = "fallback"
         # Fallback Strategy:
         # 1. Always include focus topic (dist=0)
         # 2. Then closest neighbors (dist=1)
         # 3. Then others
-        
+
         # Sort rows by distance (dist=0 first)
         def sort_key(r):
             d = r.get("dist")
             if d is None: return 100
             return d
-            
+
         sorted_rows = sorted(rows, key=sort_key)
         selected_rows = sorted_rows[:8]
     else:
@@ -345,7 +457,7 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
         ))
         count += 1
 
-    return {"nodes": topics}
+    return {"nodes": topics, "personalization_mode": personalization_mode}
 
 # --- Knowledge / Topics ---
 
@@ -398,54 +510,64 @@ def _age_to_class(age: Optional[int]) -> int:
         return 11
     return a - 6
 
-def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: TopicsAvailableRequest, resolved: int) -> List[Dict]:
+def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: TopicsAvailableRequest, resolved: int, student_tier: str = "standard") -> List[Dict]:
     results = []
     for r in rows or []:
         mn = r.get("user_class_min")
         mx = r.get("user_class_max")
-        
+
         include = True
-        
+
         # Curriculum Whitelist Check
         if allowed_topics is not None and r.get("topic_uid") not in allowed_topics:
             include = False
-        
+
         if include:
             # Goal / Class Filtering
-            
+
             try:
                 mn_val = int(mn) if mn is not None else None
                 mx_val = int(mx) if mx is not None else None
-                
+
                 is_exam = payload.goal_type == GoalType.exam
-                
-                if is_exam:
-                    # Memory 01KG0022Y97B03DEJ3W11AA854: 
+
+                # Olympiad tier: no grade restrictions at all
+                if student_tier == "olympiad":
+                    pass  # skip all grade-based filtering
+                elif is_exam:
+                    # Memory 01KG0022Y97B03DEJ3W11AA854:
                     # Filters topics by curriculum grade limits for exams (OGE<=9, EGE<=11).
                     exam_limit = 11 # Default to 11
                     if payload.exam_type == ExamType.oge:
                         exam_limit = 9
-                    
+
+                    # Advanced/gifted: allow higher exam topics (+2 grades)
+                    if student_tier in ("advanced", "gifted"):
+                        exam_limit = min(exam_limit + 2, 11)
+
                     # Filter 1: Exclude topics that start AFTER the exam limit
                     if mn_val is not None and mn_val > exam_limit:
                         include = False
-                    
+
                     # Filter 2: Exclude topics that start AFTER the user's current class
                     # (Prevent 3rd grader from seeing 7th grade topics, even if for OGE)
                     # Skip this check if resolved class is 0 (undefined/admin)
                     if mn_val is not None and resolved > 0 and resolved < mn_val:
                         include = False
-                        
+
                     # Note: We intentionally ALLOW topics where resolved > mx_val (Reviewing past material)
-                    
+
                 else:
                     # Default logic (study_topics, homework, improve_grade)
                     # Filters topics by user class
                     if mn_val is not None and resolved > 0 and resolved < mn_val:
                         include = False
-                    if mx_val is not None and resolved > 0 and resolved > mx_val:
-                        include = False
-                        
+                    if mx_val is not None and resolved > 0:
+                        # Advanced/gifted: allow +2 grades above current level
+                        grade_buffer = 2 if student_tier in ("advanced", "gifted") else 0
+                        if resolved > mx_val + grade_buffer:
+                            include = False
+
             except (ValueError, TypeError):
                 pass
         
@@ -476,7 +598,10 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
         age = ctx.attributes.get("age")
     
     resolved = int(user_class) if user_class is not None else _age_to_class(age)
-    
+
+    # Extract student tier for ability-based filtering
+    student_tier = (ctx.attributes or {}).get("student_tier", "standard")
+
     # Curriculum Filter Preparation
     allowed_topics: Optional[Set[str]] = None
     if payload.curriculum_code:
@@ -557,7 +682,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     ),
                     {"t": payload.subject_title},
                 )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             topics = []
@@ -582,7 +707,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                 ),
                 {"su": su},
             )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             ...
@@ -609,7 +734,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                 ),
                 {"t": payload.subject_title},
             )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             ...
@@ -652,6 +777,28 @@ async def adaptive_questions(payload: AdaptiveQuestionsInput) -> Dict:
         tenant_id=tid,
     )
     return {"items": examples, "meta": {}}
+
+# --- Test-Out Questions ---
+
+class TestOutQuestionsInput(BaseModel):
+    topic_uid: str
+    difficulty_min: int = 7
+    limit: int = 5
+
+@router.post("/test-out-questions", summary="Get high-difficulty questions for test-out", response_model=StandardResponse)
+async def test_out_questions(payload: TestOutQuestionsInput) -> Dict:
+    """Select high-difficulty questions for test-out assessment.
+
+    Used by advanced students to prove topic mastery and skip ahead.
+    """
+    tid = get_tenant_id()
+    questions = select_test_out_questions(
+        topic_uid=payload.topic_uid,
+        difficulty_min=payload.difficulty_min,
+        limit=payload.limit,
+        tenant_id=tid,
+    )
+    return {"items": questions, "meta": {"topic_uid": payload.topic_uid, "difficulty_min": payload.difficulty_min}}
 
 # --- Reasoning / Gaps ---
 
@@ -783,7 +930,7 @@ def _get_session(sid: str) -> Optional[Dict]:
         val = r.get(f"sess:{sid}")
         return json.loads(val) if val else None
     except Exception as e:
-        print(f"Error getting session {sid}: {e}")
+        logger.warning("session_get_error", session_id=sid, error=str(e))
         return None
 
 def _save_session(sid: str, data: Dict) -> bool:
@@ -792,7 +939,7 @@ def _save_session(sid: str, data: Dict) -> bool:
         r.setex(f"sess:{sid}", 86400, json.dumps(data))
         return True
     except Exception as e:
-        print(f"Error saving session {sid}: {e}")
+        logger.warning("session_save_error", session_id=sid, error=str(e))
         return False
 
 def _resolve_level(uc: UserContext) -> int:
@@ -1132,13 +1279,13 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             
             if not is_vis_gen and has_visual_ref:
                 if attempt < 1:
-                    print(f"Retry LLM: is_visual=False but text has visual ref: {prompt_gen[:50]}...")
+                    logger.info("llm_retry_visual_ref", prompt_preview=prompt_gen[:50])
                     messages.append({"role": "assistant", "content": raw_content})
                     messages.append({"role": "user", "content": "You set 'is_visual': false, but the text refers to a figure ('drawing', 'shown', etc.). Please regenerate the question to be PURELY textual, without any reference to an image."})
                     continue
                 else:
                     # Second failure: Force clean up
-                    print("LLM failed consistency check twice. Stripping visual refs.")
+                    logger.warning("llm_visual_consistency_failed", action="stripping_refs")
                     clean_prompt = re.sub(visual_ref_pattern, "", prompt_gen).strip()
                     if clean_prompt:
                          clean_prompt = clean_prompt[0].upper() + clean_prompt[1:]
@@ -1149,7 +1296,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
 
         except Exception as e:
             if attempt == 1: raise e
-            print(f"LLM parsing error: {e}, retrying...")
+            logger.warning("llm_parsing_error", error=str(e), action="retrying")
             pass
 
     # Process generated data after retry loop
@@ -1206,7 +1353,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                         vis["coordinates"] = normalized_coords
                         
                     except Exception as geo_err:
-                        print(f"GeometryEngine error (using original coords): {geo_err}")
+                        logger.warning("geometry_engine_error", error=str(geo_err), action="using_original_coords")
                         # If normalization fails, we attempt to use original coordinates if they are somewhat valid
                         pass
 
@@ -1219,7 +1366,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 # Convert to dict for JSON serialization compatibility
                 visualization_data = vis_obj.model_dump() if hasattr(vis_obj, "model_dump") else vis_obj.dict()
             except Exception as e:
-                print(f"Visualization validation error: {e}")
+                logger.warning("visualization_validation_error", error=str(e))
                 # Fallback: ignore visualization if invalid
                 visualization_data = None
         
@@ -1259,7 +1406,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
 
         return res_q
     except Exception as e:
-        print(f"Gen Error: {e}")
+        logger.warning("question_generation_error", error=str(e))
         # If generation fails, we raise an error instead of returning a stub
         raise HTTPException(status_code=503, detail="Unable to generate question at this time.")
 
@@ -1523,7 +1670,7 @@ async def _next_question(sess: Dict) -> Optional[Dict]:
         previous_prompts = sess.get("asked_prompts", [])
         q = await _select_question(sess["topic_uid"], d, d, set(sess["asked"]), previous_prompts=previous_prompts)
     except Exception as e:
-        print(f"Error selecting question: {e}")
+        logger.warning("question_selection_error", error=str(e))
         # Try fallback to standard difficulty if specific difficulty fails
         try:
             previous_prompts = sess.get("asked_prompts", [])
@@ -1592,10 +1739,10 @@ async def next_question(payload: NextRequest):
                 sess["question_details"][payload.question_uid]["user_answer"] = ans_dict
                 sess["question_details"][payload.question_uid]["score"] = score
             except Exception as e:
-                print(f"Error saving answer: {e}")
+                logger.warning("answer_save_error", error=str(e))
 
         if not _save_session(sid, sess):
-            print(f"Warning: Failed to save session {sid} in next_question")
+            logger.warning("session_save_failed_next", session_id=sid)
         
         done_by_min = len(sess["asked"]) >= sess["min_questions"] and _confidence(sess) >= sess["target_confidence"]
         done_by_max = len(sess["asked"]) >= sess["max_questions"]
@@ -1717,7 +1864,7 @@ async def next_question(payload: NextRequest):
                         
                         llm_analytics = json.loads(content_str)
                     except Exception as e:
-                        print(f"LLM Analytics failed: {e}")
+                        logger.warning("llm_analytics_failed", error=str(e))
                         import traceback
                         traceback.print_exc()
                         # Fallback
@@ -1781,7 +1928,7 @@ async def next_question(payload: NextRequest):
                     yield "data: {\"error\": \"Unable to generate next question\"}\n\n"
                     return
                 if not _save_session(sid, sess): # Save updated session after selecting next question
-                    print(f"Warning: Failed to save session {sid} after selecting next question")
+                    logger.warning("session_save_failed_after_next", session_id=sid)
                 yield "event: question\n"
                 yield "data: " + json.dumps({"is_completed": False, "items":[q], "meta": {}}, ensure_ascii=False) + "\n\n"
             except Exception as e:

@@ -184,3 +184,25 @@ def select_examples_for_topics(
 def all_topic_uids_from_examples() -> List[str]:
     idx = get_examples_indexed()
     return list(idx["by_topic"].keys())
+
+
+def select_test_out_questions(
+    topic_uid: str,
+    difficulty_min: int = 7,
+    limit: int = 5,
+    exclude_uids: Set[str] | None = None,
+    tenant_id: str | None = None,
+) -> List[Dict]:
+    """Select high-difficulty questions for test-out assessment.
+
+    Returns only questions with difficulty >= difficulty_min for the given topic.
+    Used by advanced students to prove mastery and skip topics.
+    """
+    return select_examples_for_topics(
+        topic_uids=[topic_uid],
+        limit=limit,
+        difficulty_min=difficulty_min,
+        difficulty_max=10,
+        exclude_uids=exclude_uids,
+        tenant_id=tenant_id,
+    )
