@@ -1544,6 +1544,33 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
         except:
             return None
 
+    def normalize_text(val: Any) -> str:
+        if val is None:
+            return ""
+        s = str(val).strip().lower().replace("ё", "е")
+        # Keep letters/digits/spaces only for robust comparison.
+        s = re.sub(r"[^a-zа-я0-9\s]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def parse_bool(val: Any) -> Optional[bool]:
+        s = normalize_text(val)
+        if not s:
+            return None
+        true_tokens = {"true", "верно", "да", "истина", "правда"}
+        false_tokens = {"false", "неверно", "нет", "ложь"}
+
+        words = set(s.split())
+        if words & true_tokens:
+            return True
+        if words & false_tokens:
+            return False
+        if s in {"1", "+"}:
+            return True
+        if s in {"0", "-"}:
+            return False
+        return None
+
     # 1. Check Single Choice (Option UIDs)
     if answer.selected_option_uids:
         if not question_data or not question_data.get("options"):
@@ -1599,9 +1626,15 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
         if question_data and question_data.get("correct_data"):
             cd = question_data["correct_data"]
             correct_val_str = str(cd.get("correct_value", "")).strip()
-            
+
+            # 0. Semantic boolean match for "верно/неверно", "да/нет", true/false.
+            user_bool = parse_bool(text)
+            correct_bool = parse_bool(correct_val_str)
+            if user_bool is not None and correct_bool is not None:
+                return 1.0 if user_bool == correct_bool else 0.0
+
             # 1. Exact/Fuzzy String Match
-            if text.lower() == correct_val_str.lower():
+            if normalize_text(text) == normalize_text(correct_val_str):
                 return 1.0
                 
             # 2. Numeric Comparison (Parsing fractions)
