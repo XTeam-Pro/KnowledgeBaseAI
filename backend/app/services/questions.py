@@ -72,7 +72,8 @@ def select_examples_for_topics(
                     "       q.type AS type, "
                     "       q.options AS options, "
                     "       q.is_visual AS is_visual, "
-                    "       q.visualization AS visualization"
+                    "       q.visualization AS visualization, "
+                    "       coalesce(q.correct_answer, ex.solution, ex.answer) AS correct_answer"
                 ),
                 {"t": topic_uids, "tid": tenant_id}
             )

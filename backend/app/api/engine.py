@@ -1443,6 +1443,8 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
             # Skip this legacy question and force generation
             pass
         else:
+            raw_answer = q.get("correct_answer")
+            correct_data = {"correct_value": str(raw_answer)} if raw_answer is not None else None
             return {
                 "question_uid": str(q.get("uid") or f"Q-MISSING-{topic_uid}"),
                 "subject_uid": "",
@@ -1452,7 +1454,11 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
                 "options": q.get("options", []),
                 "is_visual": is_q_visual,
                 "visualization": q.get("visualization", None),
-                "meta": {"difficulty": float(q.get("difficulty") or 0.5), "skill_uid": ""},
+                "meta": {
+                    "difficulty": float(q.get("difficulty") or 0.5),
+                    "skill_uid": "",
+                    "correct_data": correct_data,
+                },
             }
     
     # Pass target difficulty (using max as target) to generator
@@ -1489,7 +1495,36 @@ async def start(payload: StartRequest) -> Dict:
         first_q = await _select_question(payload.topic_uid, 3, 3, set())
         # Ensure subject_uid is populated in the question response
         first_q["subject_uid"] = payload.subject_uid
-        
+
+        # Build topic pool for multi-topic assessment (covers full curriculum/subject)
+        topic_pool: list = []
+        if payload.curriculum_code:
+            try:
+                cv = get_graph_view(payload.curriculum_code)
+                if cv.get("ok") and cv.get("nodes"):
+                    topic_pool = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
+            except Exception:
+                pass
+        elif payload.subject_uid:
+            try:
+                exam_limit = 9 if payload.exam_type == ExamType.oge else 11
+                _repo = Neo4jRepo()
+                _rows = _repo.read(
+                    "MATCH (sub:Subject {uid: $su})-[:CONTAINS*]->(t:Topic) "
+                    "WHERE t.user_class_min IS NULL OR t.user_class_min <= $lim "
+                    "RETURN t.uid AS uid ORDER BY t.user_class_min, t.uid",
+                    {"su": payload.subject_uid, "lim": exam_limit},
+                )
+                topic_pool = [r["uid"] for r in (_rows or []) if r.get("uid")]
+                _repo.close()
+            except Exception:
+                pass
+        # Remove first topic from pool start (already used) and shuffle for variety
+        import random as _random
+        if payload.topic_uid in topic_pool:
+            topic_pool.remove(payload.topic_uid)
+        _random.shuffle(topic_pool)
+
         sess_data = {
             "subject_uid": payload.subject_uid,
             "topic_uid": payload.topic_uid,
@@ -1506,12 +1541,17 @@ async def start(payload: StartRequest) -> Dict:
             "target_confidence": 0.85,
             "stability_window": 4,
             "d_history": [],
+            "topic_uids_pool": topic_pool,
+            "topic_uids_ptr": 0,
+            "questions_per_topic": {payload.topic_uid: 1},
+            "max_questions_per_topic": 2,
             "question_details": {
                 first_q["question_uid"]: {
                     "prompt": first_q["prompt"],
                     "correct_data": first_q["meta"].get("correct_data"),
                     "options": first_q.get("options"),
                     "type": first_q.get("type"),
+                    "difficulty": first_q["meta"].get("difficulty", 5),
                 }
             }
         }
@@ -1679,16 +1719,16 @@ async def _next_question(sess: Dict) -> Optional[Dict]:
     if len(sess["asked"]) >= sess["max_questions"]:
         return None
     d_last = sess["d_history"][-1] if sess["d_history"] else 3
-    
+
     # Adaptive Logic: Adjust difficulty based on the LAST answer specifically
     # User feedback: "If I answered wrong, give easier question."
-    
+
     last_q_uid = sess["asked"][-1] if sess["asked"] else None
     last_score = 0.0
     # Retrieve score of the last question if available
     if last_q_uid and "question_details" in sess and last_q_uid in sess["question_details"]:
         last_score = sess["question_details"][last_q_uid].get("score", 0.0)
-    
+
     # Determine new difficulty
     if last_score >= 0.5:
         # Correct answer -> Increase difficulty
@@ -1696,18 +1736,44 @@ async def _next_question(sess: Dict) -> Optional[Dict]:
     else:
         # Incorrect answer -> Decrease difficulty
         d = max(1, d_last - 1)
-        
+
     sess["d_history"].append(d)
-    
+
+    # Multi-topic rotation: switch topic after max_questions_per_topic questions on current topic
+    topic_uid = sess["topic_uid"]
+    topic_pool = sess.get("topic_uids_pool", [])
+    if topic_pool:
+        qpt = sess.setdefault("questions_per_topic", {})
+        max_per = sess.get("max_questions_per_topic", 2)
+        if qpt.get(topic_uid, 0) >= max_per:
+            ptr = sess.get("topic_uids_ptr", 0)
+            rotated = False
+            while ptr < len(topic_pool):
+                candidate = topic_pool[ptr]
+                ptr += 1
+                if qpt.get(candidate, 0) < max_per:
+                    sess["topic_uid"] = candidate
+                    sess["topic_uids_ptr"] = ptr
+                    topic_uid = candidate
+                    rotated = True
+                    break
+            if not rotated:
+                # All pool topics exhausted — reset ptr and allow repeats
+                sess["topic_uids_ptr"] = 0
+
+    # Track questions per topic
+    qpt = sess.setdefault("questions_per_topic", {})
+    qpt[topic_uid] = qpt.get(topic_uid, 0) + 1
+
     try:
         previous_prompts = sess.get("asked_prompts", [])
-        q = await _select_question(sess["topic_uid"], d, d, set(sess["asked"]), previous_prompts=previous_prompts)
+        q = await _select_question(topic_uid, d, d, set(sess["asked"]), previous_prompts=previous_prompts)
     except Exception as e:
         logger.warning("question_selection_error", error=str(e))
         # Try fallback to standard difficulty if specific difficulty fails
         try:
             previous_prompts = sess.get("asked_prompts", [])
-            q = await _select_question(sess["topic_uid"], 3, 3, set(sess["asked"]), previous_prompts=previous_prompts)
+            q = await _select_question(topic_uid, 3, 3, set(sess["asked"]), previous_prompts=previous_prompts)
         except Exception:
             q = None
 
@@ -1847,18 +1913,20 @@ async def next_question(payload: NextRequest):
                         for i, uid in enumerate(asked_uids):
                              if uid in q_details:
                                  qd = q_details[uid]
+                                 computed_score = float(qd.get('score') or 0.0)
+                                 result_label = "ВЕРНО ✓" if computed_score >= 0.5 else "НЕВЕРНО ✗"
                                  history_text += f"Q{i+1}: {qd.get('prompt')}\\n"
                                  history_text += f"User Answer: {qd.get('user_answer')}\\n"
                                  history_text += f"Correct Data: {qd.get('correct_data')}\\n"
-                                 history_text += f"Score: {qd.get('score')}\\n\\n"
+                                 history_text += f"Score: {computed_score} ({result_label})\\n\\n"
                         
                         sys_prompt = (
                             "You are an expert tutor. Analyze the student's session history detailedly.\\n"
                             "LANGUAGE: All output text (feedback, comments, recommendations) MUST be in RUSSIAN.\\n"
-                            "1. Re-evaluate every answer. BE LENIENT with formatting errors (e.g. 0.2 vs 2/10, or missing units). If the student shows understanding but failed specific format, give PARTIAL credit (0.5).\\n"
-                            "2. TRUST YOUR JUDGMENT OVER MACHINE SCORE. The 'Score' in history is strict. If user answer (e.g. '0.44') is a valid approximation of correct answer (e.g. '4/9'), treat it as CORRECT (100%).\\n"
-                            "3. Calculate the precise knowledge level (0-100%) based on ACTUAL correctness. Focus on CONCEPTUAL understanding.\\n"
-                            "4. Provide a specific, constructive feedback for EACH question (why it was right/wrong).\\n"
+                            "1. The 'Score' field already reflects the VERIFIED result (ВЕРНО/НЕВЕРНО). RESPECT it as ground truth for correct/incorrect classification.\\n"
+                            "2. BE LENIENT with formatting errors (e.g. 0.2 vs 2/10, or missing units). For borderline cases, give PARTIAL credit (0.5) but do NOT contradict a Score=1.0 (ВЕРНО) verdict.\\n"
+                            "3. Calculate the precise knowledge level (0-100%) based on the computed scores. Focus on CONCEPTUAL understanding.\\n"
+                            "4. Provide a specific, constructive feedback for EACH question. If Score shows ВЕРНО, acknowledge the correct answer. If НЕВЕРНО, explain what was wrong.\\n"
                             "5. Identify specific knowledge gaps (e.g. 'confuses radius and diameter').\\n"
                             "6. Provide a tailored recommendation (NOT just 'next topic', but specific actions).\\n"
                             "7. Identify specific STRENGTHS (e.g. 'quick calculation', 'good conceptual grasp', 'pattern recognition').\\n"
