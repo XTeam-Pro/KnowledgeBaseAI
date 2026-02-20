@@ -1117,14 +1117,17 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     Visualization Requirements:
     - You MUST set "is_visual": true.
     - You MUST include a "visualization" object.
-    - Canvas: 8x8 grid. Coordinates x:[0,8], y:[0,8].
-    - Center objects at (5,5). Max 3 objects.
+    - COORDINATE SYSTEM: Standard Cartesian, centered at (0,0). Origin (0,0) is the visual center.
+      - X range: integers -7 to 7 (left to right). Y range: integers -7 to 7 (bottom to top).
+      - NEVER use positive-only coordinates like [0,8]. ALWAYS use symmetric ranges around (0,0).
+    - Center main objects near (0,0). Max 3 objects.
     - "visualization" structure:
       {
         "type": "geometric_shape" | "graph" | "diagram",
-        "coordinates": [ 
+        "coordinates": [
             // Array of shape objects. ALWAYS use array of objects.
-            { "type": "polygon", "points": [{"x":..., "y":...}], "label": "ABC", "color": "..." },
+            { "type": "polygon", "points": [{"x":..., "y":...}], "label": "ABC", "color": "...",
+              "vertex_labels": [{"text": "A", "x": ..., "y": ...}, {"text": "B", "x": ..., "y": ...}] },
             { "type": "line", "points": [{"x":..., "y":...}], "label": "a" },
             { "type": "point", "x": ..., "y": ..., "label": "B", "color": "red" }
         ],
@@ -1135,13 +1138,11 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     - CRITICAL: For single points (like "Point B"), USE "type": "point" with "x", "y" directly. DO NOT use "type": "line" for a point!
     - CRITICAL: For FUNCTIONS and CURVES (e.g. parabolas, circles, sine waves):
       - USE "type": "line" (or "path").
-      - MUST generate AT LEAST 8 points to make the curve look smooth. 
+      - MUST generate AT LEAST 8 points to make the curve look smooth.
       - DO NOT use "type": "polygon" for open curves (like parabolas).
       - Example Parabola: [{"x": -3, "y": 9}, {"x": -2, "y": 4}, {"x": -1, "y": 1}, {"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 4}, {"x": 3, "y": 9}]
-    - CRITICAL: Use Standard Cartesian Coordinate System centered at (0,0).
-      - X range: [-5, 5] (Left to Right)
-      - Y range: [-5, 5] (Bottom to Top)
-      - The system will automatically map your (0,0) to the visual center.
+    - CRITICAL: vertex_labels coordinates MUST exactly match the corresponding vertex in "points".
+      Example: If vertex A is at {"x": -2, "y": 3}, then vertex_labels entry for A must be {"text": "A", "x": -2, "y": 3}.
     - CRITICAL: Coordinates MUST be mathematically consistent with the problem statement values.
     - ACCURACY RULE: If the problem involves a function (e.g. y = 2x - 1), YOU MUST CALCULATE the y-coordinates correctly for the given x-coordinates.
       Example: If y = 2x - 1 and x = 3, then y MUST be 5.
@@ -1445,6 +1446,26 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
         else:
             raw_answer = q.get("correct_answer")
             correct_data = {"correct_value": str(raw_answer)} if raw_answer is not None else None
+
+            # Normalize visualization coordinates from DB so they match the [0,10] canvas
+            # expected by the frontend (same pipeline as LLM-generated questions).
+            db_visualization = q.get("visualization", None)
+            if db_visualization and isinstance(db_visualization, dict):
+                vis_type_str = db_visualization.get("type", "")
+                if vis_type_str in ("geometric_shape", "graph", "diagram"):
+                    try:
+                        coords = db_visualization.get("coordinates")
+                        if isinstance(coords, list) and len(coords) > 0:
+                            first = coords[0]
+                            # Flat list of {x,y} points → wrap in a single shape object
+                            if isinstance(first, dict) and "x" in first and "y" in first and "points" not in first:
+                                coords = [{"type": "polygon", "points": coords, "label": "Figure"}]
+                            normalized = GeometryEngine.normalize(coords)
+                            db_visualization = dict(db_visualization)
+                            db_visualization["coordinates"] = normalized
+                    except Exception as geo_err:
+                        logger.warning("db_geometry_normalize_error", error=str(geo_err))
+
             return {
                 "question_uid": str(q.get("uid") or f"Q-MISSING-{topic_uid}"),
                 "subject_uid": "",
@@ -1453,7 +1474,7 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
                 "prompt": str(q.get("statement") or q.get("title") or ""),
                 "options": q.get("options", []),
                 "is_visual": is_q_visual,
-                "visualization": q.get("visualization", None),
+                "visualization": db_visualization,
                 "meta": {
                     "difficulty": float(q.get("difficulty") or 0.5),
                     "skill_uid": "",

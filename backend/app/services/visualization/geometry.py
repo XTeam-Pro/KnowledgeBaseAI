@@ -109,7 +109,7 @@ class GeometryEngine:
                      if abs(ny - round(ny)) < 0.01: ny = int(round(ny))
                 
                 new_points.append({"x": nx, "y": ny})
-            
+
             # Update the shape with new points using the same key as found
             if is_flat_point and new_points:
                 new_shape["x"] = new_points[0]["x"]
@@ -118,7 +118,27 @@ class GeometryEngine:
                 new_shape["points"] = new_points
             else:
                 new_shape["coordinates"] = new_points
-                
+
+            # Normalize vertex_labels using the same transform so labels track their vertices
+            if "vertex_labels" in shape and isinstance(shape["vertex_labels"], list):
+                new_vertex_labels = []
+                for vl in shape["vertex_labels"]:
+                    vx = float(vl.get("x", 0))
+                    vy = float(vl.get("y", 0))
+                    vnx = (vx * scale) + center_offset
+                    vny = (vy * scale) + center_offset
+                    vnx = max(GeometryEngine.CANVAS_MIN, min(GeometryEngine.CANVAS_MAX, vnx))
+                    vny = max(GeometryEngine.CANVAS_MIN, min(GeometryEngine.CANVAS_MAX, vny))
+                    if scale > 0.99:
+                        vnx = round(vnx * 2) / 2.0
+                        vny = round(vny * 2) / 2.0
+                        if abs(vnx - round(vnx)) < 0.01:
+                            vnx = int(round(vnx))
+                        if abs(vny - round(vny)) < 0.01:
+                            vny = int(round(vny))
+                    new_vertex_labels.append({**vl, "x": vnx, "y": vny})
+                new_shape["vertex_labels"] = new_vertex_labels
+
             normalized_shapes.append(new_shape)
             
         return normalized_shapes
