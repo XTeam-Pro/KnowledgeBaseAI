@@ -1924,6 +1924,26 @@ async def next_question(payload: NextRequest):
                                 "gap_type": "conceptual" if q_score == 0.0 else "partial",
                             })
 
+                    # Build enriched questions_review with per-question data
+                    llm_feedback_map = {
+                        qa.get("question_uid"): qa.get("feedback", "")
+                        for qa in llm_analytics.get("questions_analytics", [])
+                        if isinstance(qa, dict) and qa.get("question_uid")
+                    }
+                    enriched_review = []
+                    for uid in sess.get("asked", []):
+                        qd = q_details_for_gaps.get(uid, {})
+                        enriched_review.append({
+                            "question_uid": uid,
+                            "prompt": qd.get("prompt", ""),
+                            "type": qd.get("type", ""),
+                            "options": qd.get("options", []),
+                            "user_answer": qd.get("user_answer") or {},
+                            "correct_data": qd.get("correct_data"),
+                            "is_correct": float(qd.get("score", 0.0)) >= 0.5,
+                            "feedback": llm_feedback_map.get(uid, ""),
+                        })
+
                     # Detailed analytics
                     detailed_analytics = {
                         "gaps": llm_analytics.get("specific_gaps", gaps),
@@ -1936,7 +1956,7 @@ async def next_question(payload: NextRequest):
                             {"subtopic": "Practice", "mastery": int(final_percentage)},
                             {"subtopic": "Application", "mastery": int(final_percentage * 0.9)}
                         ],
-                        "questions_review": llm_analytics.get("questions_analytics", []),
+                        "questions_review": enriched_review,
                         "tutor_comment": llm_analytics.get("overall_comment", "")
                     }
 
