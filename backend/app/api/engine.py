@@ -58,6 +58,120 @@ async def get_node(uid: str) -> Dict:
         raise HTTPException(status_code=404, detail="Node not found")
     return {"items": [data], "meta": {}}
 
+
+@router.get("/method/{method_uid}", response_model=StandardResponse, summary="Get Method node + examples")
+async def get_method(method_uid: str) -> Dict:
+    """Return a Method node with its examples and parent skill/topic context.
+
+    Used by StudyNinja-API to generate GRR micro-lessons anchored to one Method.
+    Query traversal: Method ← [:LINKED] ← Skill ← [:USES_SKILL] ← Topic
+    Examples are fetched from Method first (Method → HAS_EXAMPLE → Example),
+    falling back to Topic-level examples if the Method has none.
+    """
+    repo = Neo4jRepo()
+    try:
+        rows = repo.read(
+            """
+            MATCH (m:Method {uid: $uid})
+            OPTIONAL MATCH (m)<-[:LINKED]-(sk:Skill)
+            OPTIONAL MATCH (t:Topic)-[:USES_SKILL]->(sk)
+            OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(mex:Example)
+            OPTIONAL MATCH (t)-[:HAS_EXAMPLE]->(tex:Example)
+            RETURN
+                m.uid          AS uid,
+                m.title        AS title,
+                m.description  AS description,
+                m.algorithm    AS algorithm,
+                sk.uid         AS skill_uid,
+                sk.title       AS skill_title,
+                t.uid          AS topic_uid,
+                t.title        AS topic_title,
+                collect(DISTINCT {
+                    uid: mex.uid, title: mex.title,
+                    statement: mex.statement, difficulty: mex.difficulty_level
+                }) AS method_examples,
+                collect(DISTINCT {
+                    uid: tex.uid, title: tex.title,
+                    statement: tex.statement, difficulty: tex.difficulty_level
+                }) AS topic_examples
+            """,
+            {"uid": method_uid},
+        )
+    finally:
+        repo.close()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Method not found")
+
+    r = rows[0]
+
+    # Prefer Method-level examples; fall back to Topic-level examples
+    examples = [e for e in (r.get("method_examples") or []) if e.get("uid")]
+    if not examples:
+        examples = [e for e in (r.get("topic_examples") or []) if e.get("uid")]
+
+    return {
+        "items": [{
+            "uid":         r.get("uid") or method_uid,
+            "title":       r.get("title") or "",
+            "description": r.get("description") or "",
+            "algorithm":   r.get("algorithm") or "",
+            "skill_uid":   r.get("skill_uid") or "",
+            "skill_title": r.get("skill_title") or "",
+            "topic_uid":   r.get("topic_uid") or "",
+            "topic_title": r.get("topic_title") or "",
+            "examples":    examples,
+        }],
+        "meta": {},
+    }
+
+@router.get("/topic/{topic_uid}/methods", response_model=StandardResponse, summary="List Methods for a Topic")
+async def get_topic_methods(topic_uid: str) -> Dict:
+    """Return all Method nodes reachable from a Topic via Topic→USES_SKILL→Skill→LINKED→Method.
+
+    Used by the frontend to discover which Method UIDs are available for a Topic
+    before calling /stage/start with kb_unit_uid=method_uid.
+    """
+    repo = Neo4jRepo()
+    try:
+        rows = repo.read(
+            """
+            MATCH (t:Topic {uid: $uid})-[:USES_SKILL]->(sk:Skill)-[:LINKED]->(m:Method)
+            OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
+            WITH t, sk, m, count(ex) AS example_count
+            RETURN
+                m.uid          AS uid,
+                m.title        AS title,
+                m.description  AS description,
+                sk.uid         AS skill_uid,
+                sk.title       AS skill_title,
+                t.uid          AS topic_uid,
+                t.title        AS topic_title,
+                example_count
+            ORDER BY m.title ASC
+            """,
+            {"uid": topic_uid},
+        )
+    finally:
+        repo.close()
+
+    items = [
+        {
+            "uid":          r.get("uid") or "",
+            "title":        r.get("title") or "",
+            "description":  r.get("description") or "",
+            "skill_uid":    r.get("skill_uid") or "",
+            "skill_title":  r.get("skill_title") or "",
+            "topic_uid":    r.get("topic_uid") or topic_uid,
+            "topic_title":  r.get("topic_title") or "",
+            "example_count": r.get("example_count") or 0,
+        }
+        for r in rows
+        if r.get("uid")
+    ]
+    return {"items": items, "meta": {"topic_uid": topic_uid, "total": len(items)}}
+
+
 @router.get("/viewport", response_model=StandardResponse)
 async def viewport(center_uid: str, depth: int = 1) -> Dict:
     ns, es = neighbors(center_uid, depth=depth, tenant_id=get_tenant_id())
