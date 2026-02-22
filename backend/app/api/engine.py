@@ -64,19 +64,17 @@ async def get_method(method_uid: str) -> Dict:
     """Return a Method node with its examples and parent skill/topic context.
 
     Used by StudyNinja-API to generate GRR micro-lessons anchored to one Method.
-    Query traversal: Method ← [:LINKED] ← Skill ← [:USES_SKILL] ← Topic
-    Examples are fetched from Method first (Method → HAS_EXAMPLE → Example),
-    falling back to Topic-level examples if the Method has none.
+    Query traversal: Topic ← [:REQUIRES_SKILL] ← Skill ← [:HAS_METHOD] ← Method
+    Examples are fetched from Method → HAS_EXAMPLE → Example.
     """
     repo = Neo4jRepo()
     try:
         rows = repo.read(
             """
             MATCH (m:Method {uid: $uid})
-            OPTIONAL MATCH (m)<-[:LINKED]-(sk:Skill)
-            OPTIONAL MATCH (t:Topic)-[:USES_SKILL]->(sk)
-            OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(mex:Example)
-            OPTIONAL MATCH (t)-[:HAS_EXAMPLE]->(tex:Example)
+            OPTIONAL MATCH (sk:Skill)-[:HAS_METHOD]->(m)
+            OPTIONAL MATCH (t:Topic)-[:REQUIRES_SKILL]->(sk)
+            OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
             RETURN
                 m.uid          AS uid,
                 m.title        AS title,
@@ -87,13 +85,9 @@ async def get_method(method_uid: str) -> Dict:
                 t.uid          AS topic_uid,
                 t.title        AS topic_title,
                 collect(DISTINCT {
-                    uid: mex.uid, title: mex.title,
-                    statement: mex.statement, difficulty: mex.difficulty_level
-                }) AS method_examples,
-                collect(DISTINCT {
-                    uid: tex.uid, title: tex.title,
-                    statement: tex.statement, difficulty: tex.difficulty_level
-                }) AS topic_examples
+                    uid: ex.uid, title: ex.title,
+                    statement: ex.statement, difficulty: ex.difficulty_level
+                }) AS method_examples
             """,
             {"uid": method_uid},
         )
@@ -105,10 +99,7 @@ async def get_method(method_uid: str) -> Dict:
 
     r = rows[0]
 
-    # Prefer Method-level examples; fall back to Topic-level examples
     examples = [e for e in (r.get("method_examples") or []) if e.get("uid")]
-    if not examples:
-        examples = [e for e in (r.get("topic_examples") or []) if e.get("uid")]
 
     return {
         "items": [{
@@ -127,7 +118,7 @@ async def get_method(method_uid: str) -> Dict:
 
 @router.get("/topic/{topic_uid}/methods", response_model=StandardResponse, summary="List Methods for a Topic")
 async def get_topic_methods(topic_uid: str) -> Dict:
-    """Return all Method nodes reachable from a Topic via Topic→USES_SKILL→Skill→LINKED→Method.
+    """Return all Method nodes reachable from a Topic via Topic→REQUIRES_SKILL→Skill→HAS_METHOD→Method.
 
     Used by the frontend to discover which Method UIDs are available for a Topic
     before calling /stage/start with kb_unit_uid=method_uid.
@@ -136,7 +127,7 @@ async def get_topic_methods(topic_uid: str) -> Dict:
     try:
         rows = repo.read(
             """
-            MATCH (t:Topic {uid: $uid})-[:USES_SKILL]->(sk:Skill)-[:LINKED]->(m:Method)
+            MATCH (t:Topic {uid: $uid})-[:REQUIRES_SKILL]->(sk:Skill)-[:HAS_METHOD]->(m:Method)
             OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
             WITH t, sk, m, count(ex) AS example_count
             RETURN
@@ -1446,30 +1437,30 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 vis["type"] = valid_type.value
 
                 # Integrations with GeometryEngine for valid coordinates
-                if valid_type in [VisualizationType.GEOMETRIC_SHAPE, VisualizationType.GRAPH, VisualizationType.DIAGRAM]:
+                # NOTE: GRAPH type keeps logical coordinates [-7..7] for the frontend coordinate grid.
+                # GeometryEngine normalization ([0..10] canvas space) is only for geometric_shape/diagram.
+                if valid_type in [VisualizationType.GEOMETRIC_SHAPE, VisualizationType.DIAGRAM]:
                     try:
                         coords = vis.get("coordinates")
-                        
+
                         # 1. Standardize input to list of shape objects
                         if isinstance(coords, list) and len(coords) > 0:
                             first_elem = coords[0]
                             # Detect "Mode 1" (list of points) and convert to "Mode 2" (list of shapes)
                             if isinstance(first_elem, dict) and "x" in first_elem and "y" in first_elem and "points" not in first_elem:
                                 coords = [{"type": "polygon", "points": coords, "label": "Generated"}]
-                        
+
                         # 2. Normalize to 10x10 canvas
-                        # GeometryEngine.normalize handles list of shapes
                         normalized_coords = GeometryEngine.normalize(coords)
-                        
+
                         # 3. Validate
                         GeometryEngine.validate(normalized_coords)
-                        
+
                         # 4. Update visualization object
                         vis["coordinates"] = normalized_coords
-                        
+
                     except Exception as geo_err:
                         logger.warning("geometry_engine_error", error=str(geo_err), action="using_original_coords")
-                        # If normalization fails, we attempt to use original coordinates if they are somewhat valid
                         pass
 
                 # Ensure type is valid enum or string
@@ -1561,12 +1552,13 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
             raw_answer = q.get("correct_answer")
             correct_data = {"correct_value": str(raw_answer)} if raw_answer is not None else None
 
-            # Normalize visualization coordinates from DB so they match the [0,10] canvas
-            # expected by the frontend (same pipeline as LLM-generated questions).
+            # Normalize visualization coordinates from DB.
+            # GRAPH type keeps logical [-7..7] coordinates (frontend draws its own axes).
+            # Only geometric_shape/diagram are normalized to [0,10] canvas space.
             db_visualization = q.get("visualization", None)
             if db_visualization and isinstance(db_visualization, dict):
                 vis_type_str = db_visualization.get("type", "")
-                if vis_type_str in ("geometric_shape", "graph", "diagram"):
+                if vis_type_str in ("geometric_shape", "diagram"):
                     try:
                         coords = db_visualization.get("coordinates")
                         if isinstance(coords, list) and len(coords) > 0:
