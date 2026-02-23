@@ -64,7 +64,7 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
             root_nodes = [n["canonical_uid"] for n in cv["nodes"]]
             if root_nodes:
                 res = s.run(
-                    "UNWIND $roots AS root MATCH (t:Topic {uid:root})-[:PREREQ*0..]->(p:Topic) RETURN collect(DISTINCT p.uid) AS uids",
+                    "UNWIND $roots AS root MATCH (t:Topic {uid:root})-[:PREREQ*0..2]->(p:Topic) RETURN collect(DISTINCT p.uid) AS uids",
                     {"roots": root_nodes}
                 ).single()
                 allowed_topics = set(res["uids"]) if res else set()

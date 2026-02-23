@@ -29,6 +29,8 @@ from app.services.visualization.geometry import GeometryEngine
 from app.core.logging import logger
 import random
 import uuid
+import zlib
+import base64
 
 router = APIRouter()
 
@@ -1033,7 +1035,14 @@ def _get_session(sid: str) -> Optional[Dict]:
     try:
         r = get_redis()
         val = r.get(f"sess:{sid}")
-        return json.loads(val) if val else None
+        if not val:
+            return None
+        try:
+            raw = zlib.decompress(base64.b64decode(val)).decode("utf-8")
+            return json.loads(raw)
+        except Exception:
+            # Backward-compat: old sessions stored as plain JSON
+            return json.loads(val)
     except Exception as e:
         logger.warning("session_get_error", session_id=sid, error=str(e))
         return None
@@ -1041,7 +1050,9 @@ def _get_session(sid: str) -> Optional[Dict]:
 def _save_session(sid: str, data: Dict) -> bool:
     try:
         r = get_redis()
-        r.setex(f"sess:{sid}", 86400, json.dumps(data))
+        raw = json.dumps(data, ensure_ascii=False)
+        compressed = base64.b64encode(zlib.compress(raw.encode("utf-8"), level=6)).decode("ascii")
+        r.setex(f"sess:{sid}", 86400, compressed)
         return True
     except Exception as e:
         logger.warning("session_save_error", session_id=sid, error=str(e))
@@ -1116,7 +1127,8 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         "description": "",
         "prereqs": [],
         "subject": "",
-        "skills": []
+        "skills": [],
+        "methods": [],
     }
     
     try:
@@ -1126,12 +1138,14 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             MATCH (t:Topic {uid: $uid})
             OPTIONAL MATCH (t)-[:PREREQ]->(p:Topic)
             OPTIONAL MATCH (t)-[:REQUIRES_SKILL]->(s:Skill)
+            OPTIONAL MATCH (s)-[:HAS_METHOD]->(m:Method)
             OPTIONAL MATCH (sub:Subject)-[:CONTAINS*]->(t)
-            RETURN 
-                t.title as title, 
-                t.description as description, 
-                collect(DISTINCT p.title) as prereqs, 
+            RETURN
+                t.title as title,
+                t.description as description,
+                collect(DISTINCT p.title) as prereqs,
                 collect(DISTINCT {title: s.title, definition: s.definition}) as skills,
+                collect(DISTINCT m.title) as methods,
                 head(collect(sub.title)) as subject
             """
             res = tx.run(query, uid=topic_uid)
@@ -1142,7 +1156,8 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                     "description": rec["description"] or "",
                     "prereqs": [p for p in rec["prereqs"] if p],
                     "subject": rec["subject"] or "",
-                    "skills": [s for s in rec["skills"] if s and s.get("title")]
+                    "skills": [s for s in rec["skills"] if s and s.get("title")],
+                    "methods": [m for m in rec["methods"] if m],
                 }
             return None
         
@@ -1219,49 +1234,19 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     visual_instruction = ""
     if is_visual:
         visual_instruction = """
-    Visualization Requirements:
-    - You MUST set "is_visual": true.
-    - You MUST include a "visualization" object.
-    - COORDINATE SYSTEM: Standard Cartesian, centered at (0,0). Origin (0,0) is the visual center.
-      - X range: integers -7 to 7 (left to right). Y range: integers -7 to 7 (bottom to top).
-      - NEVER use positive-only coordinates like [0,8]. ALWAYS use symmetric ranges around (0,0).
-    - Center main objects near (0,0). Max 3 objects.
-    - "visualization" structure:
-      {
-        "type": "geometric_shape" | "graph" | "diagram",
-        "coordinates": [
-            // Array of shape objects. ALWAYS use array of objects.
-            { "type": "polygon", "points": [{"x":..., "y":...}], "label": "ABC", "color": "...",
-              "vertex_labels": [{"text": "A", "x": ..., "y": ...}, {"text": "B", "x": ..., "y": ...}] },
-            { "type": "line", "points": [{"x":..., "y":...}], "label": "a" },
-            { "type": "point", "x": ..., "y": ..., "label": "B", "color": "red" }
-        ],
-        "indicators": [
-            { "type": "dimension", "start": {"x":..., "y":...}, "end": {"x":..., "y":...}, "text": "5 cm" }
-        ]
-      }
-    - CRITICAL: For single points (like "Point B"), USE "type": "point" with "x", "y" directly. DO NOT use "type": "line" for a point!
-    - CRITICAL: For FUNCTIONS and CURVES (e.g. parabolas, circles, sine waves):
-      - USE "type": "line" (or "path").
-      - MUST generate AT LEAST 8 points to make the curve look smooth.
-      - DO NOT use "type": "polygon" for open curves (like parabolas).
-      - Example Parabola: [{"x": -3, "y": 9}, {"x": -2, "y": 4}, {"x": -1, "y": 1}, {"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 4}, {"x": 3, "y": 9}]
-    - CRITICAL: vertex_labels coordinates MUST exactly match the corresponding vertex in "points".
-      Example: If vertex A is at {"x": -2, "y": 3}, then vertex_labels entry for A must be {"text": "A", "x": -2, "y": 3}.
-    - CRITICAL: Coordinates MUST be mathematically consistent with the problem statement values.
-    - ACCURACY RULE: If the problem involves a function (e.g. y = 2x - 1), YOU MUST CALCULATE the y-coordinates correctly for the given x-coordinates.
-      Example: If y = 2x - 1 and x = 3, then y MUST be 5.
-    - PREFERENCE: Use INTEGER coordinates (e.g. x=2, y=-3) whenever possible. Avoid decimals.
-    - VISUALIZATION CONSISTENCY:
-      1. Every labeled point in the text (e.g., "Point A") MUST exist in the visualization with a matching label.
-      2. If you describe a property (e.g., "AB = 6"), the visual distance between A and B must be proportional to 6.
-      3. Use 'math_consistency_proof' field in JSON to explain why your coordinates match the text.
+    Visualization: set "is_visual":true and include "visualization":{"type":"...","coordinates":[...]}.
+    Types:
+    - "graph": functions/parabolas in Cartesian [-7..7]. Series: {"type":"line","label":"y=f(x)","points":[{"x":N,"y":N},...]}. Min 9 points. Parabola MUST include vertex. Clamp |y|>7 (skip those x). Verify each y mathematically.
+    - "geometric_shape": polygons in [0..7]x[0..7]. Each: {"type":"polygon","points":[...],"label":"ABC","vertex_labels":[...]}. Max 3 shapes.
+    - "table": {"type":"table","headers":[...],"rows":[[...],...]} — no coordinates field.
+    - "diagram": number lines, pie/bar charts.
+    CRITICAL: All x,y MUST be integers in [-7,7]. Problem MUST have a unique correct answer. Verify before writing.
     """
 
     avoid_context = ""
     if previous_prompts:
-        # Limit to last 3 prompts to avoid context overflow, but enough to prevent immediate repetition
-        avoid_context = f"\\nIMPORTANT: DO NOT generate questions similar to the following (create something different):\\n{json.dumps(previous_prompts[-3:], ensure_ascii=False)}\\n"
+        recent = previous_prompts[-3:]
+        avoid_context = f"\nAvoid repeating topics similar to: {'; '.join(recent)}\n"
 
     # Define JSON structure based on type to avoid duplication
     if q_type == "single_choice":
@@ -1292,13 +1277,18 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     """
 
     # Enhanced Context for LLM
-    description_text = f"Topic Description: {topic_context['description']}" if topic_context['description'] else ""
-    prereqs_text = f"Prerequisites: {', '.join(topic_context['prereqs'])}" if topic_context['prereqs'] else ""
+    desc = (topic_context['description'] or "")[:120]
+    description_text = f"Topic Description: {desc}" if desc else ""
+    prereqs_text = f"Prerequisites: {', '.join(topic_context['prereqs'][:5])}" if topic_context['prereqs'] else ""
     subject_text = f"Subject/Domain: {topic_context['subject']}" if topic_context['subject'] else ""
-    
+
     skills_text = ""
     if topic_context['skills']:
-        skills_text = "Related Skills/Methods:\n" + "\n".join([f"- {s['title']}: {s.get('definition', '')}" for s in topic_context['skills']])
+        skill_lines = [f"- {s['title']}: {(s.get('definition') or '')[:80]}" for s in topic_context['skills'][:5]]
+        skills_text = "Skills:\n" + "\n".join(skill_lines)
+    if topic_context.get('methods'):
+        methods_joined = ", ".join(topic_context['methods'][:5])
+        skills_text += f"\nMethods: {methods_joined}"
 
     prompt_text = f"""
     Generate a unique assessment question for the topic "{topic_title}" (UID: {topic_uid}).
@@ -1306,50 +1296,46 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     {description_text}
     {prereqs_text}
     {skills_text}
-    
-    Context: Adaptive learning platform.
-    Target Audience: High school / University students.
-    Language: Russian.
-    
+
+    Context: Russian school adaptive learning platform (ОГЭ/ЕГЭ preparation).
+    Target Audience: Russian 9th–11th grade students.
+    Language: Russian. ALL text MUST be in Russian.
+
+    EXAM STANDARD: Questions MUST match the style and difficulty of official Russian ОГЭ/ЕГЭ exam tasks from sdamgia.ru / fipi.ru.
+    - ОГЭ tasks 1–14: arithmetic, algebra, geometry, statistics/probability, graphs of functions.
+    - Each question must be self-contained, solvable with pen and paper, and have a single unambiguous correct answer.
+    - The problem conditions must NOT contradict each other (triangle inequality, discriminant ≥ 0, etc.).
+
     Difficulty Level: {difficulty}/10 ({diff_desc}).
-    - Level 1-3: Basic definition, simple recognition, 1-step problems.
-    - Level 4-7: Standard problems, application of formula, 2-step reasoning.
-    - Level 8-10: Complex problems, synthesis of concepts, edge cases, multi-step.
-    
-    CRITICAL INSTRUCTION:
-    If the topic is simple (e.g. "Multiplication Table") but the Difficulty Level is High (8-10), DO NOT generate simple questions (like "2*2"). 
-    Instead, generate complex problems involving the topic, such as:
-    - Word problems applying the concept.
-    - Reverse problems (find factors).
-    - Multi-step equations.
-    - Conceptual questions about properties (distributivity, etc.).
-    
+    - Level 1-4: Direct formula application, 1-step arithmetic (ОГЭ tasks 1–8 style).
+    - Level 5-7: 2-step reasoning, word problems, basic geometry (ОГЭ tasks 9–14 style).
+    - Level 8-10: Multi-step proofs, complex geometry, systems of equations (ЕГЭ profile style).
+
     Question Type: {q_type}
     Is Visual Task: {is_visual}
     {visual_instruction}
     {avoid_context}
-    
-    IMPORTANT: If "Is Visual Task" is True, you MUST provide a valid "visualization" object in the JSON.
-    The "visualization" object MUST have a "type" (one of: geometric_shape, graph, diagram, chart) and "coordinates".
-    
-    IMPORTANT: If "Is Visual Task" is False, you MUST NOT refer to any pictures, figures, or drawings in the question text.
-    The question must be purely textual and solvable without any visual aid.
-    
+
+    SOLVABILITY CHECK (MANDATORY before writing the question):
+    1. Write the problem to yourself mentally.
+    2. Solve it yourself step by step.
+    3. Verify: does your correct_answer satisfy ALL conditions in the problem?
+    4. Only then write the JSON. If you cannot solve it, simplify the numbers.
+
+    IMPORTANT: If "Is Visual Task" is True, you MUST provide a valid "visualization" object.
+    IMPORTANT: If "Is Visual Task" is False, do NOT refer to figures/graphs/drawings in the question text.
+
     Requirements:
-    - Output valid JSON only.
-    - "single_choice": 4 options, 1 correct.
-    - "numeric": Problem with specific numeric answer.
-    - "boolean": True/False statement.
-    - "free_text": Open-ended question.
-    - GRAMMAR: Use singular form for single objects (e.g. "Фигура A (синяя)", not "синие"). Match gender and number correctly.
-    - CONSISTENCY: The question text MUST match the number of objects in the visualization. If you show 4 figures, do not say "two figures".
-    - MULTIPLE ANSWERS: If a problem has multiple valid answers (e.g. roots of a quadratic equation "x1=2, x2=3"), AND the question type is "single_choice", the correct option text MUST include ALL solutions (e.g. "2 и 3" or "2; 3"). DO NOT list only one root as the correct option if there are two.
-    - COORDINATES SYNC: If the text mentions specific coordinates (e.g. "(2, 3)"), the visualization object MUST contain a point at x=2, y=3.
-    - COORDINATE RANGE: All x, y values MUST be integers between -7 and 7.
-    - INTEGER VALUES: Points MUST use integer coordinates.
-    - GRAPH QUALITY: For curves, provide at least 5 points to ensure smooth rendering.
-    - MATH CONSISTENCY: The coordinates MUST mathematically satisfy the function mentioned (e.g. if y=2^x, point (2, 4) is valid, (2, 5) is invalid).
-    
+    - Output valid JSON only. No markdown, no text outside JSON.
+    - "single_choice": Exactly 4 options, exactly 1 correct. Distractors must be plausible but wrong.
+    - "numeric": The answer is a single number (integer or simple decimal). State units if needed.
+    - "free_text": Short answer (1–3 words or a number with explanation).
+    - GRAMMAR: Match Russian gender/number correctly for all nouns.
+    - MULTIPLE ROOTS: If quadratic has two roots x1, x2, the correct option for single_choice MUST contain both: "x₁=2, x₂=3". Never list only one root.
+    - COORDINATES SYNC: Every coordinate mentioned in text (e.g. "точка A(2;3)") MUST appear in visualization.
+    - COORDINATE RANGE: All visualization x, y MUST be integers in [-7, 7].
+    - GRAPH QUALITY: Minimum 9 points for curves. Parabola MUST include vertex point.
+
     JSON Structure:
     {json_structure}
     """
@@ -1414,7 +1400,8 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             for i, opt in enumerate(data["options"]):
                 options.append({
                     "option_uid": opt.get("option_uid") or f"opt_{i}",
-                    "text": opt.get("text", "")
+                    "text": opt.get("text", ""),
+                    "is_correct": bool(opt.get("is_correct", False)),
                 })
         
         visualization_data = None
@@ -1433,13 +1420,35 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                     if vis_type == "chart": valid_type = VisualizationType.CHART
                     elif vis_type == "diagram": valid_type = VisualizationType.DIAGRAM
                     elif vis_type == "graph": valid_type = VisualizationType.GRAPH
-                
-                vis["type"] = valid_type.value
+                    elif vis_type == "table":
+                        # Table is a special type: pass through as-is with headers/rows
+                        visualization_data = {
+                            "type": "table",
+                            "headers": vis.get("headers", []),
+                            "rows": vis.get("rows", []),
+                            "params": vis.get("params", {}),
+                        }
+                        # Skip rest of processing for table
+                        vis_obj = None
+
+                if vis_type == "table":
+                    pass  # already handled above
+                else:
+                    vis["type"] = valid_type.value
+
+                # For GRAPH type: normalize flat [{x,y}] to [{type,label,points:[]}] series format
+                if valid_type == VisualizationType.GRAPH:
+                    coords = vis.get("coordinates")
+                    if isinstance(coords, list) and len(coords) > 0:
+                        first = coords[0]
+                        if isinstance(first, dict) and "x" in first and "y" in first and "points" not in first:
+                            # Flat list of points → single line series
+                            vis["coordinates"] = [{"type": "line", "label": "graph", "points": coords}]
 
                 # Integrations with GeometryEngine for valid coordinates
                 # NOTE: GRAPH type keeps logical coordinates [-7..7] for the frontend coordinate grid.
                 # GeometryEngine normalization ([0..10] canvas space) is only for geometric_shape/diagram.
-                if valid_type in [VisualizationType.GEOMETRIC_SHAPE, VisualizationType.DIAGRAM]:
+                if valid_type in [VisualizationType.GEOMETRIC_SHAPE, VisualizationType.DIAGRAM] and vis_type != "table":
                     try:
                         coords = vis.get("coordinates")
 
@@ -1463,14 +1472,15 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                         logger.warning("geometry_engine_error", error=str(geo_err), action="using_original_coords")
                         pass
 
-                # Ensure type is valid enum or string
-                vis_obj = VisualizationData(
-                    type=vis.get("type"),
-                    coordinates=vis.get("coordinates"),
-                    params=vis.get("params", {})
-                )
-                # Convert to dict for JSON serialization compatibility
-                visualization_data = vis_obj.model_dump() if hasattr(vis_obj, "model_dump") else vis_obj.dict()
+                # Table type was already handled above (visualization_data set directly)
+                if vis_type != "table":
+                    vis_obj = VisualizationData(
+                        type=vis.get("type"),
+                        coordinates=vis.get("coordinates"),
+                        params=vis.get("params", {})
+                    )
+                    # Convert to dict for JSON serialization compatibility
+                    visualization_data = vis_obj.model_dump() if hasattr(vis_obj, "model_dump") else vis_obj.dict()
             except Exception as e:
                 logger.warning("visualization_validation_error", error=str(e))
                 # Fallback: ignore visualization if invalid
@@ -1598,6 +1608,9 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
 )
 async def start(payload: StartRequest) -> Dict:
     try:
+        uc = payload.user_context or UserContext()
+        resolved = _resolve_level(uc)
+
         # Resolve topic_uid if missing (e.g. for Exam mode starting from first topic)
         if not payload.topic_uid:
             if payload.curriculum_code:
@@ -1609,12 +1622,26 @@ async def start(payload: StartRequest) -> Dict:
                         if n.get("canonical_uid"):
                             payload.topic_uid = n["canonical_uid"]
                             break
-            
+
+            # Fallback: pick the first accessible topic under subject_uid
+            if not payload.topic_uid and payload.subject_uid:
+                try:
+                    _repo = Neo4jRepo()
+                    _rows = _repo.read(
+                        "MATCH (sub:Subject {uid:$su})-[:CONTAINS*]->(t:Topic) "
+                        "WHERE (t.user_class_min IS NULL OR t.user_class_min <= $lvl) "
+                        "AND (t.user_class_max IS NULL OR t.user_class_max >= $lvl) "
+                        "RETURN t.uid AS uid ORDER BY t.user_class_min, t.uid LIMIT 1",
+                        {"su": payload.subject_uid, "lvl": resolved},
+                    )
+                    _repo.close()
+                    if _rows:
+                        payload.topic_uid = _rows[0]["uid"]
+                except Exception:
+                    pass
+
             if not payload.topic_uid:
                 raise HTTPException(status_code=400, detail="topic_uid is required (or valid curriculum_code with topics)")
-
-        uc = payload.user_context or UserContext()
-        resolved = _resolve_level(uc)
         if not _topic_accessible(payload.subject_uid, payload.topic_uid, resolved, payload.goal_type):
             raise HTTPException(status_code=404, detail="Topic not available")
         import uuid
@@ -1674,7 +1701,7 @@ async def start(payload: StartRequest) -> Dict:
             "max_questions_per_topic": 2,
             "question_details": {
                 first_q["question_uid"]: {
-                    "prompt": first_q["prompt"],
+                    "prompt": first_q["prompt"][:120],
                     "correct_data": first_q["meta"].get("correct_data"),
                     "options": first_q.get("options"),
                     "type": first_q.get("type"),
@@ -1757,7 +1784,8 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
         return 1.0 if selected == correct_uids else 0.0
 
     # 2. Check Numeric (Value)
-    if answer.value is not None:
+    # Skip if text is provided (text answer takes priority over the sentinel value: 0 sent by frontend)
+    if answer.value is not None and not answer.text:
         try:
             user_val = parse_number(answer.value)
             if user_val is None:
@@ -1785,7 +1813,7 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
 
     # 3. Check Free Text
     if answer.text:
-        text = str(answer.text).strip()
+        text = str(answer.text).strip().replace(',', '.')  # normalize comma-decimal
         if len(text) < 1:
             return 0.0
             
@@ -1914,20 +1942,20 @@ async def _next_question(sess: Dict) -> Optional[Dict]:
     # Ensure subject_uid is populated in the question response
     if q:
         q["subject_uid"] = sess.get("subject_uid", "")
-        # Update prompt history
+        # Update prompt history (store truncated to avoid bloating session)
         if "asked_prompts" not in sess: sess["asked_prompts"] = []
-        sess["asked_prompts"].append(q["prompt"])
-        if len(sess["asked_prompts"]) > 20:
-            sess["asked_prompts"] = sess["asked_prompts"][-20:]
+        sess["asked_prompts"].append(q["prompt"][:80])
+        if len(sess["asked_prompts"]) > 5:
+            sess["asked_prompts"] = sess["asked_prompts"][-5:]
         
-        # Save question details
+        # Save question details (prompt truncated to 120 chars to reduce session size)
         if "question_details" not in sess: sess["question_details"] = {}
         sess["question_details"][q["question_uid"]] = {
-            "prompt": q["prompt"],
+            "prompt": q["prompt"][:120],
             "correct_data": q["meta"].get("correct_data"),
             "options": q.get("options"),
             "type": q.get("type"),
-            "difficulty": q["meta"].get("difficulty", 5), # Default to 5 if missing
+            "difficulty": q["meta"].get("difficulty", 5),
         }
 
     sess["last_question_uid"] = q["question_uid"]
