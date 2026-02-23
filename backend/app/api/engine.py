@@ -26,6 +26,7 @@ from app.services.questions import select_examples_for_topics
 from app.events.publisher import get_redis
 from app.services.kb.builder import openai_chat_async
 from app.services.visualization.geometry import GeometryEngine
+from app.services.visualization.graph_engine import GraphEngine
 from app.core.logging import logger
 import random
 import uuid
@@ -988,6 +989,7 @@ class StartRequest(BaseModel):
     user_context: UserContext
     goal_type: Optional[GoalType] = None
     curriculum_code: Optional[str] = None
+    exam_type: Optional[ExamType] = None
 
 class OptionDTO(BaseModel):
     option_uid: str
@@ -1024,6 +1026,7 @@ class AnswerDTO(BaseModel):
 class ClientMeta(BaseModel):
     time_spent_ms: Optional[int] = None
     attempt: Optional[int] = None
+    current_difficulty: Optional[int] = None  # API's time-aware difficulty seed (1–10)
 
 class NextRequest(BaseModel):
     assessment_session_id: str
@@ -1209,7 +1212,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         # Prioritize free_text/numeric for calculation tasks to prevent guessing
         q_types = ["free_text", "free_text", "numeric"]
     else:
-        q_types = ["single_choice", "single_choice", "numeric", "free_text", "boolean"]
+        q_types = ["single_choice", "single_choice", "single_choice", "free_text"]
     
     q_type = random.choice(q_types)
 
@@ -1236,11 +1239,16 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         visual_instruction = """
     Visualization: set "is_visual":true and include "visualization":{"type":"...","coordinates":[...]}.
     Types:
-    - "graph": functions/parabolas in Cartesian [-7..7]. Series: {"type":"line","label":"y=f(x)","points":[{"x":N,"y":N},...]}. Min 9 points. Parabola MUST include vertex. Clamp |y|>7 (skip those x). Verify each y mathematically.
+    - "graph": for function plots, use this structure instead of coordinates:
+        {"type":"graph","functions":[{"formula":"PYTHON_EXPR","label":"y = display_form","color":"blue"}]}
+        formula MUST be a valid Python expression using variable x, e.g.: "x**2 - 3", "2*x + 1", "sin(x)".
+        Allowed: +, -, *, **, /, (), sin, cos, tan, sqrt, abs, log, exp, pi, e.
+        DO NOT provide coordinates — the server computes all points automatically from the formula.
+        MULTIPLE functions: add more objects to the functions array.
     - "geometric_shape": polygons in [0..7]x[0..7]. Each: {"type":"polygon","points":[...],"label":"ABC","vertex_labels":[...]}. Max 3 shapes.
     - "table": {"type":"table","headers":[...],"rows":[[...],...]} — no coordinates field.
     - "diagram": number lines, pie/bar charts.
-    CRITICAL: All x,y MUST be integers in [-7,7]. Problem MUST have a unique correct answer. Verify before writing.
+    CRITICAL for geometric_shape: All x,y MUST be integers in [-7,7]. Problem MUST have a unique correct answer. Verify before writing.
     """
 
     avoid_context = ""
@@ -1436,14 +1444,27 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 else:
                     vis["type"] = valid_type.value
 
-                # For GRAPH type: normalize flat [{x,y}] to [{type,label,points:[]}] series format
+                # For GRAPH type: prefer server-side computation from formulas.
                 if valid_type == VisualizationType.GRAPH:
-                    coords = vis.get("coordinates")
-                    if isinstance(coords, list) and len(coords) > 0:
-                        first = coords[0]
-                        if isinstance(first, dict) and "x" in first and "y" in first and "points" not in first:
-                            # Flat list of points → single line series
-                            vis["coordinates"] = [{"type": "line", "label": "graph", "points": coords}]
+                    functions = vis.get("functions")
+                    if isinstance(functions, list) and len(functions) > 0:
+                        # New path: LLM gave formulas → compute points server-side
+                        computed = GraphEngine.compute_series(functions)
+                        if computed:
+                            vis["coordinates"] = computed
+                            vis.pop("functions", None)
+                        else:
+                            logger.warning("graph_engine_no_valid_series", formulas=[f.get("formula") for f in functions])
+                            visualization_data = None
+                    else:
+                        # Legacy path: LLM gave raw coordinates → normalize flat [{x,y}] to series
+                        coords = vis.get("coordinates")
+                        if isinstance(coords, list) and len(coords) > 0:
+                            first = coords[0]
+                            if isinstance(first, dict) and "x" in first and "y" in first and "points" not in first:
+                                vis["coordinates"] = [{"type": "line", "label": "graph", "points": coords}]
+                            # Re-evaluate any series that carry a formula field
+                            vis["coordinates"] = GraphEngine.recompute_series_from_coords(vis["coordinates"])
 
                 # Integrations with GeometryEngine for valid coordinates
                 # NOTE: GRAPH type keeps logical coordinates [-7..7] for the frontend coordinate grid.
@@ -1465,7 +1486,18 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                         # 3. Validate
                         GeometryEngine.validate(normalized_coords)
 
-                        # 4. Update visualization object
+                        # 4. Snap vertex labels to nearest polygon vertices (prevents floating labels)
+                        normalized_coords = [
+                            GeometryEngine.snap_labels_to_vertices(s) for s in normalized_coords
+                        ]
+
+                        # 5. Validate & relabel triangle vertices against angle constraints in question
+                        question_prompt = data.get("prompt", "")
+                        normalized_coords = GeometryEngine.validate_and_relabel_triangle(
+                            normalized_coords, question_prompt
+                        )
+
+                        # 6. Update visualization object
                         vis["coordinates"] = normalized_coords
 
                     except Exception as geo_err:
@@ -1485,7 +1517,14 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 logger.warning("visualization_validation_error", error=str(e))
                 # Fallback: ignore visualization if invalid
                 visualization_data = None
-        
+
+        # If visualization ended up with empty coordinates, discard it — frontend can't render nothing.
+        if visualization_data is not None:
+            coords = visualization_data.get("coordinates")
+            if isinstance(coords, list) and len(coords) == 0:
+                logger.warning("visualization_empty_coordinates", action="discarding")
+                visualization_data = None
+
         # Correction: If options are present, force type to single_choice
         final_type = q_type
         if options and len(options) > 0:
@@ -1835,13 +1874,26 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
             # 2. Numeric Comparison (Parsing fractions)
             val_user = parse_number(text)
             val_correct = parse_number(correct_val_str)
-            
+
+            # 2b. If correct_val_str is a full solution (e.g. "2x+5=17 => x=6. Ответ: 6."),
+            # try to extract the final answer number (after "Ответ:" or last standalone number).
+            if val_user is not None and val_correct is None and correct_val_str:
+                # Try "Ответ: N" pattern first
+                ot_match = re.search(r"[Оо]твет[:\s]+([+-]?\d+(?:[.,]\d+)?)", correct_val_str)
+                if ot_match:
+                    val_correct = parse_number(ot_match.group(1))
+                else:
+                    # Fallback: extract all numbers and use the last one
+                    nums = re.findall(r"[+-]?\d+(?:[.,]\d+)?", correct_val_str)
+                    if nums:
+                        val_correct = parse_number(nums[-1])
+
             if val_user is not None and val_correct is not None:
                 # Same relaxed logic as numeric
                 is_close_rel = abs(val_user - val_correct) <= 0.02 * max(abs(val_correct), 1.0)
                 is_close_abs = abs(val_user - val_correct) < 0.02
                 return 1.0 if (is_close_rel or is_close_abs) else 0.0
-                
+
         return 0.0
 
     return 0.0
@@ -1868,29 +1920,28 @@ def _confidence(sess: Dict) -> float:
     )
     return max(0.0, min(1.0, result["confidence"]))
 
-async def _next_question(sess: Dict) -> Optional[Dict]:
+async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> Optional[Dict]:
+    """Select the next question at the difficulty determined by StudyNinja-API.
+
+    Adaptive difficulty is owned by the API backend (diagnostic_service.adapt_difficulty).
+    KB receives the target difficulty via difficulty_hint and simply serves a question at
+    that level — no internal adaptation.  d_history is preserved for scoring only.
+    """
     good = sess["good"]
     bad = sess["bad"]
     if len(sess["asked"]) >= sess["max_questions"]:
         return None
-    d_last = sess["d_history"][-1] if sess["d_history"] else 3
 
-    # Adaptive Logic: Adjust difficulty based on the LAST answer specifically
-    # User feedback: "If I answered wrong, give easier question."
-
-    last_q_uid = sess["asked"][-1] if sess["asked"] else None
-    last_score = 0.0
-    # Retrieve score of the last question if available
-    if last_q_uid and "question_details" in sess and last_q_uid in sess["question_details"]:
-        last_score = sess["question_details"][last_q_uid].get("score", 0.0)
-
-    # Determine new difficulty
-    if last_score >= 0.5:
-        # Correct answer -> Increase difficulty
-        d = min(10, d_last + 1)
+    if difficulty_hint is not None:
+        d = max(1, min(10, difficulty_hint))
     else:
-        # Incorrect answer -> Decrease difficulty
-        d = max(1, d_last - 1)
+        # Standalone fallback (no API hint): simple ±1 from last d
+        d_last = sess["d_history"][-1] if sess["d_history"] else 3
+        last_q_uid = sess["asked"][-1] if sess["asked"] else None
+        last_score = 0.0
+        if last_q_uid and "question_details" in sess and last_q_uid in sess["question_details"]:
+            last_score = sess["question_details"][last_q_uid].get("score", 0.0)
+        d = min(10, d_last + 1) if last_score >= 0.5 else max(1, d_last - 1)
 
     sess["d_history"].append(d)
 
@@ -1955,7 +2006,9 @@ async def _next_question(sess: Dict) -> Optional[Dict]:
             "correct_data": q["meta"].get("correct_data"),
             "options": q.get("options"),
             "type": q.get("type"),
-            "difficulty": q["meta"].get("difficulty", 5),
+            # Use d (1-10 adaptive scale) so difficulty_weighted_bayesian gets correct weights.
+            # meta.difficulty is on a 0-1 scale and would produce near-zero weights (0.01-0.1).
+            "difficulty": d,
         }
 
     sess["last_question_uid"] = q["question_uid"]
@@ -2016,6 +2069,10 @@ async def next_question(payload: NextRequest):
                 )
                 if len(sess["asked"]) < new_max:
                     done_by_min = False
+        # Extract difficulty hint from StudyNinja-API (time-aware adapt_difficulty result)
+        difficulty_hint: Optional[int] = None
+        if payload.client_meta and payload.client_meta.current_difficulty is not None:
+            difficulty_hint = int(payload.client_meta.current_difficulty)
         async def _stream():
             try:
                 yield "event: ack\n"
@@ -2198,15 +2255,32 @@ async def next_question(payload: NextRequest):
                     yield "event: done\n"
                     yield "data: " + json.dumps(res, ensure_ascii=False) + "\n\n"
                     return
-                q = await _next_question(sess)
+                q = await _next_question(sess, difficulty_hint=difficulty_hint)
                 if not q:
                     yield "event: error\n"
                     yield "data: {\"error\": \"Unable to generate next question\"}\n\n"
                     return
                 if not _save_session(sid, sess): # Save updated session after selecting next question
                     logger.warning("session_save_failed_after_next", session_id=sid)
+                from app.services.reasoning.bayesian_confidence import difficulty_weighted_bayesian
+                _bay = difficulty_weighted_bayesian(
+                    [
+                        {"correct": float(sess["question_details"].get(uid, {}).get("score", 0.0)) >= 0.5,
+                         "difficulty": float(sess["question_details"].get(uid, {}).get("difficulty", 5.0))}
+                        for uid in sess.get("asked", [])
+                    ],
+                    variance_threshold=0.02,
+                )
                 yield "event: question\n"
-                yield "data: " + json.dumps({"is_completed": False, "items":[q], "meta": {}}, ensure_ascii=False) + "\n\n"
+                yield "data: " + json.dumps({
+                    "is_completed": False,
+                    "items": [q],
+                    "meta": {},
+                    "confidence": _bay["confidence"],
+                    "variance": _bay["variance"],
+                    "posterior_a": _bay["posterior_a"],
+                    "posterior_b": _bay["posterior_b"],
+                }, ensure_ascii=False) + "\n\n"
             except Exception as e:
                 import traceback
                 traceback.print_exc()

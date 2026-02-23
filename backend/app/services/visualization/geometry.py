@@ -1,6 +1,7 @@
 import math
+import re
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,168 @@ class GeometryEngine:
             normalized_shapes.append(new_shape)
             
         return normalized_shapes
+
+    @staticmethod
+    def snap_labels_to_vertices(shape: Dict[str, Any]) -> Dict[str, Any]:
+        """Snap every vertex_label to the nearest polygon vertex point.
+
+        LLM sometimes places labels at slightly different coordinates than the
+        actual polygon vertices. After normalization the drift can cause labels
+        to float in open space instead of sitting on a corner.
+        """
+        points = shape.get("points") or shape.get("coordinates") or []
+        vertex_labels = shape.get("vertex_labels")
+        if not points or not vertex_labels:
+            return shape
+
+        def _nearest(label_pt: Dict[str, Any]) -> Dict[str, Any]:
+            lx, ly = float(label_pt.get("x", 0)), float(label_pt.get("y", 0))
+            best = min(points, key=lambda p: (p["x"] - lx) ** 2 + (p["y"] - ly) ** 2)
+            return {**label_pt, "x": best["x"], "y": best["y"]}
+
+        new_shape = dict(shape)
+        new_shape["vertex_labels"] = [_nearest(vl) for vl in vertex_labels]
+        return new_shape
+
+    @staticmethod
+    def _angle_at_vertex(prev_p: Dict, curr_p: Dict, next_p: Dict) -> Optional[float]:
+        """Interior angle (degrees) at curr_p given the two adjacent vertices."""
+        v1 = (prev_p["x"] - curr_p["x"], prev_p["y"] - curr_p["y"])
+        v2 = (next_p["x"] - curr_p["x"], next_p["y"] - curr_p["y"])
+        mag1 = math.hypot(*v1)
+        mag2 = math.hypot(*v2)
+        if mag1 < 1e-9 or mag2 < 1e-9:
+            return None
+        cos_a = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (mag1 * mag2)))
+        return math.degrees(math.acos(cos_a))
+
+    @staticmethod
+    def validate_and_relabel_triangle(
+        shapes: List[Dict[str, Any]],
+        question_text: str,
+        angle_tolerance: float = 12.0,
+    ) -> List[Dict[str, Any]]:
+        """For triangles, extract angle constraints from question text and verify
+        that vertex labels are assigned to the correct vertices.
+
+        If labels are wrong, reassign them so the described angles match the
+        actual geometry.  Only triangles (3 points) are processed; other shapes
+        are returned unchanged.
+
+        ``angle_tolerance`` (degrees) is the allowed deviation between the
+        described angle and the computed one (accounts for LLM rounding).
+        """
+        # Parse "угол X = N" or "угол X равен N" patterns (Cyrillic + Latin labels)
+        _ANGLE_RE = re.compile(
+            r"(?:угол|угл)\w*\s+([A-Za-zА-Яа-я])\s*(?:=|равен|равн\w*|составляет|равняется)\s*(\d+)",
+            re.IGNORECASE,
+        )
+
+        constraints: Dict[str, float] = {}
+        for m in _ANGLE_RE.finditer(question_text):
+            constraints[m.group(1).upper()] = float(m.group(2))
+
+        if not constraints:
+            return shapes
+
+        result: List[Dict[str, Any]] = []
+        for shape in shapes:
+            points = shape.get("points") or shape.get("coordinates") or []
+            vertex_labels = shape.get("vertex_labels", [])
+            n = len(points)
+
+            if n != 3 or not vertex_labels:
+                result.append(shape)
+                continue
+
+            # Compute interior angle at each polygon vertex (index 0, 1, 2)
+            computed: List[Optional[float]] = []
+            for i in range(3):
+                a = GeometryEngine._angle_at_vertex(
+                    points[(i - 1) % 3], points[i], points[(i + 1) % 3]
+                )
+                computed.append(a)
+
+            # Current label at each vertex index
+            # vertex_labels may have fewer entries than points — pad with None
+            label_at: Dict[int, str] = {}
+            for vl in vertex_labels:
+                # Find which vertex index this label sits at (after snap)
+                lx, ly = float(vl.get("x", 0)), float(vl.get("y", 0))
+                idx = min(range(3), key=lambda i: (points[i]["x"] - lx) ** 2 + (points[i]["y"] - ly) ** 2)
+                label_at[idx] = vl.get("label", "")
+
+            # Build reverse map label→index
+            idx_of: Dict[str, int] = {v: k for k, v in label_at.items()}
+
+            # Check each constraint
+            mismatch = False
+            for label, expected_angle in constraints.items():
+                if label not in idx_of:
+                    continue
+                actual = computed[idx_of[label]]
+                if actual is None or abs(actual - expected_angle) > angle_tolerance:
+                    mismatch = True
+                    break
+
+            if not mismatch:
+                result.append(shape)
+                continue
+
+            # Try to find a permutation of label assignments that satisfies constraints
+            from itertools import permutations
+
+            current_labels = [label_at.get(i, "") for i in range(3)]
+            best_assignment: Optional[List[str]] = None
+
+            for perm in permutations(current_labels):
+                # perm[i] is the label we'd assign to vertex index i
+                ok = True
+                for label, expected_angle in constraints.items():
+                    try:
+                        vi = perm.index(label)
+                    except ValueError:
+                        continue
+                    a = computed[vi]
+                    if a is None or abs(a - expected_angle) > angle_tolerance:
+                        ok = False
+                        break
+                if ok:
+                    best_assignment = list(perm)
+                    break
+
+            if best_assignment is None:
+                # No valid relabeling found — keep original but log warning
+                logger.warning(
+                    "triangle_relabel_failed",
+                    constraints=constraints,
+                    computed_angles=computed,
+                    label_at=label_at,
+                )
+                result.append(shape)
+                continue
+
+            # Rebuild vertex_labels with new assignment (keep offset fields if any)
+            old_vl_by_label = {vl.get("label", ""): vl for vl in vertex_labels}
+            new_vertex_labels: List[Dict[str, Any]] = []
+            for i, new_label in enumerate(best_assignment):
+                if not new_label:
+                    continue
+                old_vl = old_vl_by_label.get(new_label, {})
+                new_vertex_labels.append(
+                    {**old_vl, "label": new_label, "x": points[i]["x"], "y": points[i]["y"]}
+                )
+
+            logger.info(
+                "triangle_relabeled",
+                old=label_at,
+                new={i: l for i, l in enumerate(best_assignment)},
+            )
+            new_shape = dict(shape)
+            new_shape["vertex_labels"] = new_vertex_labels
+            result.append(new_shape)
+
+        return result
 
     @staticmethod
     def check_collisions(shapes: List[Dict[str, Any]]) -> List[Tuple[int, int]]:

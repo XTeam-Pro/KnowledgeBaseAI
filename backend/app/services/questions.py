@@ -98,7 +98,9 @@ def select_examples_for_topics(
             for r in rows:
                 d_raw = r.get('difficulty', 3)
                 try:
-                    d_int = int(float(d_raw))
+                    d_float = float(d_raw)
+                    # Handle both 0–1 scale (Neo4j float) and 1–10 integer scale
+                    d_int = max(1, round(d_float * 10)) if d_float <= 1.0 else int(d_float)
                 except Exception:
                     d_int = 3
                 if d_int < difficulty_min or d_int > difficulty_max:
@@ -137,7 +139,9 @@ def select_examples_for_topics(
                 for e in idx["by_topic"].get(tu, []):
                     d_raw = e.get('difficulty', 3)
                     try:
-                        d = int(float(d_raw))
+                        d_float = float(d_raw)
+                        # Handle both 0–1 scale (float) and 1–10 integer scale
+                        d = max(1, round(d_float * 10)) if d_float <= 1.0 else int(d_float)
                     except Exception:
                         d = 3
                     if d < difficulty_min or d > difficulty_max:
