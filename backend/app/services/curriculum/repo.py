@@ -2,6 +2,28 @@ import psycopg2
 from typing import Dict, List, Optional
 from app.config.settings import settings
 
+_CURRICULUM_ALIASES = {
+    "RU-OGE-MATH-2026": "OGE-MATH-2026",
+    "RU-EGE-BASE-MATH-2026": "EGE-BASE-MATH-2026",
+    "RU-EGE-PROF-MATH-2026": "EGE-PROF-MATH-2026",
+}
+
+
+def _candidate_codes(code: str) -> List[str]:
+    c = (code or "").strip()
+    if not c:
+        return []
+    candidates = [c]
+    alias = _CURRICULUM_ALIASES.get(c)
+    if alias and alias not in candidates:
+        candidates.append(alias)
+    # reverse alias support
+    for k, v in _CURRICULUM_ALIASES.items():
+        if v == c and k not in candidates:
+            candidates.append(k)
+    return candidates
+
+
 def get_conn():
     dsn = str(settings.pg_dsn) if settings.pg_dsn else ""
     if not dsn:
@@ -49,12 +71,21 @@ def get_curriculum(code: str) -> Optional[Dict]:
     res = None
     with conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, title, standard, language, status FROM curricula WHERE code=%s", (code,))
-            row = cur.fetchone()
+            row = None
+            resolved_code = code
+            for candidate in _candidate_codes(code):
+                cur.execute(
+                    "SELECT id, title, standard, language, status FROM curricula WHERE code=%s",
+                    (candidate,),
+                )
+                row = cur.fetchone()
+                if row:
+                    resolved_code = candidate
+                    break
             if row:
                 cid = row[0]
                 res = {
-                    "code": code,
+                    "code": resolved_code,
                     "title": row[1],
                     "standard": row[2],
                     "language": row[3],

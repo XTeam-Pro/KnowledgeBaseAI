@@ -1369,29 +1369,77 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             
             data = json.loads(content.strip())
             
-            # Validation: check for visual references in text when is_visual is False
             is_vis_gen = data.get("is_visual", False)
             prompt_gen = data.get("prompt", "")
-            
-            # Regex for visual references
+
+            correction_requests: list[str] = []
+
+            # Check 1: visual references in text when is_visual is False
             visual_ref_pattern = r"(?i)(на\s+)?(рисун|чертеж|схем)(к|ке|ка|е|а|ок)|(см\.|смотри)\s+рис|изображен(ы|о|а)?|shown\s+in\s+(the\s+)?figure|see\s+figure"
-            has_visual_ref = bool(re.search(visual_ref_pattern, prompt_gen))
-            
-            if not is_vis_gen and has_visual_ref:
+            if not is_vis_gen and re.search(visual_ref_pattern, prompt_gen):
                 if attempt < 1:
-                    logger.info("llm_retry_visual_ref", prompt_preview=prompt_gen[:50])
-                    messages.append({"role": "assistant", "content": raw_content})
-                    messages.append({"role": "user", "content": "You set 'is_visual': false, but the text refers to a figure ('drawing', 'shown', etc.). Please regenerate the question to be PURELY textual, without any reference to an image."})
-                    continue
+                    correction_requests.append(
+                        "You set 'is_visual': false but the text refers to a figure or drawing. "
+                        "Rewrite the question to be PURELY textual with no references to figures or images."
+                    )
                 else:
-                    # Second failure: Force clean up
+                    # Force-strip on last attempt
                     logger.warning("llm_visual_consistency_failed", action="stripping_refs")
-                    clean_prompt = re.sub(visual_ref_pattern, "", prompt_gen).strip()
-                    if clean_prompt:
-                         clean_prompt = clean_prompt[0].upper() + clean_prompt[1:]
-                    data["prompt"] = clean_prompt
-            
-            # Success
+                    clean = re.sub(visual_ref_pattern, "", prompt_gen).strip()
+                    if clean:
+                        data["prompt"] = clean[0].upper() + clean[1:]
+
+            # Check 2: non-integer answer for counting questions (numeric / free_text)
+            _count_pattern = r"скольк|количеств|сколько\s+\w+|число\s+(человек|людей|учеников|студентов|предметов|деталей|задач|вариантов|дней|часов)|how\s+many"
+            if q_type in ("numeric", "free_text") and re.search(_count_pattern, prompt_gen, re.IGNORECASE):
+                cv = data.get("correct_value")
+                if cv is not None:
+                    _is_noninteger = False
+                    try:
+                        cv_str = str(cv).strip().replace(",", ".")
+                        if "/" in cv_str:
+                            parts = cv_str.split("/")
+                            val = float(parts[0]) / float(parts[1])
+                        else:
+                            val = float(cv_str)
+                        _is_noninteger = (val != int(val)) or val < 0
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        pass
+                    if _is_noninteger:
+                        if attempt < 1:
+                            correction_requests.append(
+                                f"The question asks 'how many' (counting discrete items/people), "
+                                f"but the answer '{cv}' is not a positive whole integer. "
+                                "Adjust the numbers in the problem so the answer is a positive whole integer."
+                            )
+                        else:
+                            logger.warning("llm_noninteger_count_unfixed", value=cv)
+
+            # Check 3: fraction/decimal options in single_choice counting questions
+            if q_type == "single_choice" and re.search(_count_pattern, prompt_gen, re.IGNORECASE):
+                _frac_pattern = r"\d+\s*/\s*\d+|\d+[.,]\d+"
+                bad_opts = [
+                    opt.get("text", "") for opt in data.get("options", [])
+                    if re.search(_frac_pattern, str(opt.get("text", "")))
+                ]
+                if bad_opts and attempt < 1:
+                    correction_requests.append(
+                        "The question asks 'how many' (counting items), but some answer options contain "
+                        f"fractions or decimals ({', '.join(bad_opts[:2])}). "
+                        "Rewrite so every option is a positive whole integer."
+                    )
+
+            if correction_requests and attempt < 1:
+                logger.info("llm_retry_corrections", issues=len(correction_requests), preview=prompt_gen[:60])
+                messages.append({"role": "assistant", "content": raw_content})
+                messages.append({
+                    "role": "user",
+                    "content": "Fix the following issues in your response:\n" +
+                               "\n".join(f"- {r}" for r in correction_requests),
+                })
+                continue
+
+            # All checks passed (or last attempt exhausted)
             break
 
         except Exception as e:
@@ -1654,6 +1702,11 @@ async def start(payload: StartRequest) -> Dict:
         if not payload.topic_uid:
             if payload.curriculum_code:
                 cv = get_graph_view(payload.curriculum_code)
+                if not cv.get("ok") or not cv.get("nodes"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid curriculum_code: {payload.curriculum_code}",
+                    )
                 if cv.get("ok") and cv.get("nodes"):
                     # Pick the first topic from the curriculum
                     # nodes are ordered by order_index
@@ -1692,12 +1745,13 @@ async def start(payload: StartRequest) -> Dict:
         # Build topic pool for multi-topic assessment (covers full curriculum/subject)
         topic_pool: list = []
         if payload.curriculum_code:
-            try:
-                cv = get_graph_view(payload.curriculum_code)
-                if cv.get("ok") and cv.get("nodes"):
-                    topic_pool = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
-            except Exception:
-                pass
+            cv = get_graph_view(payload.curriculum_code)
+            if not cv.get("ok") or not cv.get("nodes"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid curriculum_code: {payload.curriculum_code}",
+                )
+            topic_pool = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
         elif payload.subject_uid:
             try:
                 exam_limit = 9 if payload.exam_type == ExamType.oge else 11
@@ -1964,7 +2018,7 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
                     rotated = True
                     break
             if not rotated:
-                # All pool topics exhausted — reset ptr and allow repeats
+                # All pool topics exhausted — reset pointer and retry rotation.
                 sess["topic_uids_ptr"] = 0
 
     # Track questions per topic
@@ -1984,11 +2038,20 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
             q = None
 
     if not q:
-        # If still no question, return None to signal end or error?
-        # Better to return None and let the loop handle it, but wait,
-        # next_question expects a question.
-        # If we can't find a question, maybe we should stop the session?
-        return None
+        # Last resort: widen difficulty, but still exclude already asked question UIDs.
+        try:
+            previous_prompts = sess.get("asked_prompts", [])
+            q = await _select_question(
+                topic_uid,
+                max(1, d - 1),
+                min(10, d + 1),
+                set(sess["asked"]),
+                previous_prompts=previous_prompts,
+            )
+        except Exception:
+            q = None
+        if not q:
+            return None
 
     # Ensure subject_uid is populated in the question response
     if q:
@@ -2073,10 +2136,12 @@ async def next_question(payload: NextRequest):
         difficulty_hint: Optional[int] = None
         if payload.client_meta and payload.client_meta.current_difficulty is not None:
             difficulty_hint = int(payload.client_meta.current_difficulty)
+        is_correct = score >= 0.5
+        answer_score = score
         async def _stream():
             try:
                 yield "event: ack\n"
-                yield "data: {\"items\":[{\"accepted\":true}],\"meta\":{}}\n\n"
+                yield "data: " + json.dumps({"items": [{"accepted": True}], "meta": {}, "is_correct": is_correct, "score": round(answer_score, 4)}) + "\n\n"
                 if done_by_min or done_by_max:
                     # Precise Score Calculation
                     # Calculate weighted score based on difficulty
@@ -2100,15 +2165,15 @@ async def next_question(payload: NextRequest):
                             total_difficulty += diff
                             
                     raw_score = total_weighted_score / max(1.0, total_difficulty)
-                    score = round(raw_score, 2)
+                    overall_score = round(raw_score, 2)
 
                     # Expanded analytics
                     gaps = []
-                    if score < 0.85:
+                    if overall_score < 0.85:
                         gaps.append("Есть пробелы в понимании сложных аспектов темы")
-                    if score < 0.6:
+                    if overall_score < 0.6:
                         gaps.append("Требуется повторение базовых определений")
-                    if score < 0.4:
+                    if overall_score < 0.4:
                         gaps.append("Критические пробелы в знаниях")
                     
                     # Generate LLM Analytics
@@ -2181,11 +2246,11 @@ async def next_question(payload: NextRequest):
                         import traceback
                         traceback.print_exc()
                         # Fallback
-                        llm_analytics = {"questions_analytics": [], "overall_comment": "Detailed analysis unavailable due to service error.", "knowledge_level_percent": int(score*100), "specific_gaps": [], "recommendation": "Review the material."}
+                        llm_analytics = {"questions_analytics": [], "overall_comment": "Detailed analysis unavailable due to service error.", "knowledge_level_percent": int(overall_score * 100), "specific_gaps": [], "recommendation": "Review the material."}
 
                     # Use LLM calculated level if reasonable, else fallback to raw score
                     llm_level = llm_analytics.get("knowledge_level_percent")
-                    final_percentage = llm_level if isinstance(llm_level, (int, float)) else int(score * 100)
+                    final_percentage = llm_level if isinstance(llm_level, (int, float)) else int(overall_score * 100)
                     
                     # Normalized score for mastery consistency
                     normalized_score = final_percentage / 100.0
@@ -2228,8 +2293,8 @@ async def next_question(payload: NextRequest):
                     detailed_analytics = {
                         "gaps": llm_analytics.get("specific_gaps", gaps),
                         "structured_gaps": structured_gaps,
-                        "recommended_focus": llm_analytics.get("recommendation", "Повторить теорию и пройти практику 'We Do'" if score < 0.7 else "Закрепить успех практикой"),
-                        "strength": llm_analytics.get("strength", "Хорошая скорость ответов" if score > 0.8 else "Внимательность к деталям"),
+                        "recommended_focus": llm_analytics.get("recommendation", "Повторить теорию и пройти практику 'We Do'" if overall_score < 0.7 else "Закрепить успех практикой"),
+                        "strength": llm_analytics.get("strength", "Хорошая скорость ответов" if overall_score > 0.8 else "Внимательность к деталям"),
                         "current_percentage": final_percentage,
                         "topic_breakdown": [
                             {"subtopic": "Theory", "mastery": min(100, int(final_percentage * 1.1))},

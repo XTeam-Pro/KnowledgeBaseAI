@@ -3,9 +3,9 @@
 Seed script: создание/обновление curricula и curriculum_nodes в PostgreSQL.
 
 Создаёт три программы:
-  OGE-MATH-2026       — ОГЭ Математика, 11 топиков (канонические uid)
-  EGE-BASE-MATH-2026  — ЕГЭ Базовый, 8 топиков
-  EGE-PROF-MATH-2026  — ЕГЭ Профиль, 15 топиков
+  RU-OGE-MATH-2026       — ОГЭ Математика, 11 топиков (канонические uid)
+  RU-EGE-BASE-MATH-2026  — ЕГЭ Базовый, 8 топиков
+  RU-EGE-PROF-MATH-2026  — ЕГЭ Профиль, 15 топиков
 
 Использование (внутри контейнера):
     python /app/scripts/seed_curricula.py [--dry-run]
@@ -28,7 +28,7 @@ from app.config.settings import settings  # noqa: E402
 
 CURRICULA = [
     {
-        "code": "OGE-MATH-2026",
+        "code": "RU-OGE-MATH-2026",
         "title": "ОГЭ Математика 2026",
         "standard": "ОГЭ",
         "language": "ru",
@@ -49,7 +49,7 @@ CURRICULA = [
         ],
     },
     {
-        "code": "EGE-BASE-MATH-2026",
+        "code": "RU-EGE-BASE-MATH-2026",
         "title": "ЕГЭ Базовый Математика 2026",
         "standard": "ЕГЭ Базовый",
         "language": "ru",
@@ -66,7 +66,7 @@ CURRICULA = [
         ],
     },
     {
-        "code": "EGE-PROF-MATH-2026",
+        "code": "RU-EGE-PROF-MATH-2026",
         "title": "ЕГЭ Профиль Математика 2026",
         "standard": "ЕГЭ Профиль",
         "language": "ru",
