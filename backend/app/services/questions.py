@@ -73,7 +73,7 @@ def select_examples_for_topics(
                     "         options: null, is_visual: null, visualization: null, "
                     "         correct_answer: coalesce(ex.solution, ex.answer)}] AS ex_rows, "
                     "     [q IN questions | {uid: q.uid, title: q.title, "
-                    "         statement: coalesce(q.text, q.statement), "
+                    "         statement: q.statement, "
                     "         difficulty: q.difficulty, type: q.type, "
                     "         options: q.options, is_visual: q.is_visual, "
                     "         visualization: q.visualization, "

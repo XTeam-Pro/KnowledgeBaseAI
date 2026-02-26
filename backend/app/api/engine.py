@@ -712,16 +712,17 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
 
     # Curriculum Filter Preparation
     allowed_topics: Optional[Set[str]] = None
+    curriculum_root_nodes: List[str] = []
     if payload.curriculum_code:
         cv = get_graph_view(payload.curriculum_code)
         if cv.get("ok") and cv.get("nodes"):
-             root_nodes = [n["canonical_uid"] for n in cv["nodes"]]
-             if root_nodes:
+             curriculum_root_nodes = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
+             if curriculum_root_nodes:
                  repo_cv = Neo4jRepo()
                  try:
                      res_cv = repo_cv.read(
                         "UNWIND $roots AS root MATCH (t:Topic {uid:root})-[:PREREQ*0..]->(p:Topic) RETURN collect(DISTINCT p.uid) AS uids",
-                        {"roots": root_nodes}
+                        {"roots": curriculum_root_nodes}
                      )
                      if res_cv and res_cv[0].get("uids"):
                          allowed_topics = set(res_cv[0]["uids"])
@@ -859,6 +860,49 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "prereq_topic_uids": [],
                 }
             )
+
+    # Curriculum fallback: if strict curriculum filter produced no topics due missing Subject->Topic
+    # links, return ordered curriculum roots directly (still filtered by class/exam rules).
+    if not topics and payload.curriculum_code and curriculum_root_nodes:
+        try:
+            repo = Neo4jRepo()
+            rows = repo.read(
+                (
+                    "UNWIND range(0, size($uids)-1) AS idx "
+                    "WITH idx, $uids[idx] AS uid "
+                    "MATCH (t:Topic {uid:uid}) "
+                    "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
+                    "RETURN t.uid AS topic_uid, t.title AS title, "
+                    "       t.user_class_min AS user_class_min, t.user_class_max AS user_class_max, "
+                    "       t.difficulty_band AS difficulty_band, "
+                    "       null AS subsection_uid, null AS subsection_title, "
+                    "       collect(pre.uid) AS prereq_topic_uids, idx "
+                    "ORDER BY idx ASC"
+                ),
+                {"uids": curriculum_root_nodes},
+            )
+            # For curriculum fallback use curriculum roots as source of truth and keep order.
+            # Do not apply subject containment filter here: canonical topics can be outside
+            # Subject->Section edges in partially migrated graphs.
+            for r in rows or []:
+                tuid = r.get("topic_uid")
+                if not tuid:
+                    continue
+                topics.append(
+                    {
+                        "topic_uid": tuid,
+                        "title": r.get("title"),
+                        "user_class_min": int(r.get("user_class_min")) if isinstance(r.get("user_class_min"), (int, float)) else None,
+                        "user_class_max": int(r.get("user_class_max")) if isinstance(r.get("user_class_max"), (int, float)) else None,
+                        "difficulty_band": r.get("difficulty_band") or "standard",
+                        "prereq_topic_uids": [p for p in (r.get("prereq_topic_uids") or []) if p],
+                        "subsection_uid": None,
+                        "subsection_title": None,
+                    }
+                )
+            repo.close()
+        except Exception:
+            ...
     return {"items": topics, "meta": {"subject_uid": su or payload.subject_uid, "resolved_user_class": resolved}}
 
 # --- Adaptive Questions ---
@@ -1122,6 +1166,42 @@ def _topic_accessible(subject_uid: str, topic_uid: str, resolved_level: int, goa
         return True
 
 
+def _parse_llm_json_safely(content: str) -> dict:
+    """Parse LLM JSON with tolerance to invalid backslash escapes."""
+    if not isinstance(content, str):
+        raise ValueError("LLM content is not a string")
+
+    text = content.strip()
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0]
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0]
+    text = text.strip()
+
+    candidates = [text]
+
+    # Braces-only candidate if model wrapped with extra prose.
+    l = text.find("{")
+    r = text.rfind("}")
+    if l != -1 and r != -1 and r > l:
+        candidates.append(text[l : r + 1])
+
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError:
+            # Fix invalid escapes like "\(" or "\q"
+            fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", cand)
+            if fixed != cand:
+                try:
+                    return json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
+
+    # Re-raise with original parser error for upstream retry logic
+    return json.loads(text)
+
+
 async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: bool = False, previous_prompts: List[str] = [], difficulty: int = 5) -> Dict:
     # 1. Get Topic Context (Title, Description, Prerequisites, Subject, Skills)
     repo = None
@@ -1362,12 +1442,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             content = res.get("content", "")
             raw_content = content
             
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
-            
-            data = json.loads(content.strip())
+            data = _parse_llm_json_safely(content)
             
             is_vis_gen = data.get("is_visual", False)
             prompt_gen = data.get("prompt", "")
