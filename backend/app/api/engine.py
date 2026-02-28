@@ -2525,6 +2525,81 @@ async def assessment_history(session_id: str):
     asked_uids = sess.get("asked", [])
     q_details = sess.get("question_details", {})
 
+    def _option_text_by_uid(opts: list, uid: str) -> Optional[str]:
+        """Resolve option uid to human-readable text."""
+        if not opts or not isinstance(opts, list):
+            return None
+        for opt in opts:
+            if isinstance(opt, dict) and (opt.get("option_uid") == uid or opt.get("uid") == uid):
+                return opt.get("text") or opt.get("label") or None
+        return None
+
+    def _resolve_correct_text(correct_data, options) -> Optional[str]:
+        """Extract human-readable correct answer from correct_data."""
+        if not correct_data:
+            return None
+        if not isinstance(correct_data, dict):
+            return str(correct_data)
+
+        # 1. Direct correct_value (DB questions: {"correct_value": "42"})
+        cv = correct_data.get("correct_value")
+        if cv is not None:
+            return str(cv)
+
+        # 2. correct_answer field (LLM generated)
+        ca = correct_data.get("correct_answer")
+        if ca is not None:
+            return str(ca)
+
+        # 3. Correct option by uid
+        c_uid = correct_data.get("correct_option_uid")
+        if c_uid and options:
+            t = _option_text_by_uid(options, c_uid)
+            if t:
+                return t
+
+        # 4. Find correct option from options list (is_correct flag)
+        if options and isinstance(options, list):
+            correct_opts = [o for o in options if isinstance(o, dict) and o.get("is_correct")]
+            if correct_opts:
+                texts = [o.get("text") or o.get("label") or "?" for o in correct_opts]
+                return "; ".join(texts)
+
+        # 5. Fallback to value/text fields
+        for key in ("value", "text", "answer"):
+            v = correct_data.get(key)
+            if v is not None:
+                return str(v)
+
+        return None
+
+    def _resolve_user_text(user_answer, options) -> Optional[str]:
+        """Extract human-readable user answer."""
+        if not user_answer:
+            return None
+        if not isinstance(user_answer, dict):
+            return str(user_answer)
+
+        # 1. Selected options — resolve to text
+        selected = user_answer.get("selected_option_uids") or []
+        if selected and options:
+            texts = []
+            for s_uid in selected:
+                t = _option_text_by_uid(options, s_uid)
+                texts.append(t if t else s_uid)
+            return "; ".join(texts)
+
+        # 2. Free text answer
+        if user_answer.get("text"):
+            return str(user_answer["text"])
+
+        # 3. Numeric value (skip sentinel 0 when no other data)
+        val = user_answer.get("value")
+        if val is not None:
+            return str(val)
+
+        return None
+
     items: List[Dict[str, Any]] = []
     for i, uid in enumerate(asked_uids):
         qd = q_details.get(uid, {})
@@ -2533,49 +2608,8 @@ async def assessment_history(session_id: str):
         correct_data = qd.get("correct_data")
         options = qd.get("options")
 
-        # Build human-readable correct answer text
-        correct_text = None
-        if correct_data:
-            if isinstance(correct_data, dict):
-                correct_text = (
-                    correct_data.get("correct_answer")
-                    or correct_data.get("value")
-                    or correct_data.get("text")
-                )
-                if correct_text is None and "correct_option_uid" in correct_data and options:
-                    c_uid = correct_data["correct_option_uid"]
-                    for opt in (options if isinstance(options, list) else []):
-                        if isinstance(opt, dict) and opt.get("uid") == c_uid:
-                            correct_text = opt.get("text") or opt.get("label")
-                            break
-                if correct_text is None:
-                    correct_text = str(correct_data)
-            else:
-                correct_text = str(correct_data)
-
-        # Build human-readable user answer text
-        user_text = None
-        if user_answer:
-            if isinstance(user_answer, dict):
-                selected = user_answer.get("selected_option_uids") or []
-                if selected and options:
-                    texts = []
-                    for s_uid in selected:
-                        for opt in (options if isinstance(options, list) else []):
-                            if isinstance(opt, dict) and opt.get("uid") == s_uid:
-                                texts.append(opt.get("text") or opt.get("label") or s_uid)
-                                break
-                        else:
-                            texts.append(s_uid)
-                    user_text = "; ".join(texts)
-                elif user_answer.get("text"):
-                    user_text = str(user_answer["text"])
-                elif user_answer.get("value") is not None:
-                    user_text = str(user_answer["value"])
-                else:
-                    user_text = str(user_answer)
-            else:
-                user_text = str(user_answer)
+        correct_text = _resolve_correct_text(correct_data, options)
+        user_text = _resolve_user_text(user_answer, options)
 
         items.append({
             "index": i + 1,
