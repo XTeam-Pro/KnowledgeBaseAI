@@ -2,10 +2,13 @@
 """
 Seed script: создание/обновление curricula и curriculum_nodes в PostgreSQL.
 
-Создаёт три программы:
-  RU-OGE-MATH-2026       — ОГЭ Математика, 11 топиков (канонические uid)
-  RU-EGE-BASE-MATH-2026  — ЕГЭ Базовый, 8 топиков
-  RU-EGE-PROF-MATH-2026  — ЕГЭ Профиль, 15 топиков
+Создаёт три программы по структуре ФИПИ КИМ 2026:
+  RU-OGE-MATH-2026       — ОГЭ Математика, 25 заданий
+  RU-EGE-BASE-MATH-2026  — ЕГЭ Базовый, 21 задание
+  RU-EGE-PROF-MATH-2026  — ЕГЭ Профиль, 19 заданий
+
+Маппинг задание → Topic UID соответствует спецификации и
+кодификатору ФИПИ 2026.
 
 Использование (внутри контейнера):
     python /app/scripts/seed_curricula.py [--dry-run]
@@ -23,10 +26,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.config.settings import settings  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Определения curricula
+# Определения curricula — ФИПИ КИМ 2026
 # ---------------------------------------------------------------------------
 
 CURRICULA = [
+    # ==================================================================
+    # ОГЭ Математика 2026 — 25 заданий (Ч1: 1-19 краткий, Ч2: 20-25 развёрнутый)
+    # Спецификация: https://fipi.ru/oge/demoversii-specifikacii-kodifikatory
+    # ==================================================================
     {
         "code": "RU-OGE-MATH-2026",
         "title": "ОГЭ Математика 2026",
@@ -34,20 +41,35 @@ CURRICULA = [
         "language": "ru",
         "status": "active",
         "nodes": [
-            # Порядок соответствует логике изучения (простое → сложное)
-            {"order": 1,  "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",    "task": "1"},
-            {"order": 2,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",     "task": "3"},
-            {"order": 3,  "uid": "TOP-MATH-INEQUALITIES",          "task": "4"},
-            {"order": 4,  "uid": "TOP-MATH-PROGRESSIONS",          "task": "5"},
-            {"order": 5,  "uid": "TOP-MATH-PLANE-GEOMETRY",        "task": "6"},
-            {"order": 6,  "uid": "TOP-MATH-FUNCTIONS-GRAPHS",      "task": "7-8"},
-            {"order": 7,  "uid": "TOP-MATH-PROBABILITY-STATISTICS","task": "10"},
-            {"order": 8,  "uid": "TOP-MATH-APPLIED-MATH",          "task": "11"},
-            {"order": 9,  "uid": "TOP-MATH-ADVANCED-ALGEBRA",      "task": "12"},
-            {"order": 10, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM",   "task": "13"},
-            {"order": 11, "uid": "TOP-MATH-ADVANCED-FUNCTIONS",    "task": "14"},
+            # --- Практико-ориентированный блок (задания 1-5) ---
+            {"order": 1,  "uid": "TOP-OGE-PRAKTIKO-ORIENTIROVANNYE-ZADACHI-2026", "task": "1"},
+            {"order": 2,  "uid": "TOP-MATH-NUMBERS-CALCULATIONS",                "task": "2,6"},
+            {"order": 3,  "uid": "TOP-EDINITSY-IZMERENIYA-002",                   "task": "3"},
+            {"order": 4,  "uid": "TOP-MATH-APPLIED-MATH",                         "task": "4"},
+            {"order": 5,  "uid": "TOP-OGE-ANALIZ-TABLITS-I-DIAGRAMM-2026",       "task": "5"},
+            # --- Алгебра (задания 6-14) ---
+            {"order": 6,  "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",                  "task": "7,8,12"},
+            {"order": 7,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",                   "task": "9"},
+            {"order": 8,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",              "task": "10,19"},
+            {"order": 9,  "uid": "TOP-MATH-FUNCTIONS-GRAPHS",                    "task": "11"},
+            {"order": 10, "uid": "TOP-MATH-INEQUALITIES",                        "task": "13"},
+            {"order": 11, "uid": "TOP-MATH-PROGRESSIONS",                        "task": "14"},
+            # --- Геометрия (задания 15-19) ---
+            {"order": 12, "uid": "TOP-UGLY-9cbfc3",                              "task": "15"},
+            {"order": 13, "uid": "TOP-PERIMETR-I-PLOSHCHAD-003",                 "task": "16"},
+            {"order": 14, "uid": "TOP-MATH-PLANE-GEOMETRY",                      "task": "17,18"},
+            # --- Часть 2: развёрнутый ответ (задания 20-25) ---
+            {"order": 15, "uid": "TOP-MATH-ADVANCED-ALGEBRA",                    "task": "20"},
+            {"order": 16, "uid": "TOP-TEKSTOVYE-ZADACHI-004",                    "task": "21"},
+            {"order": 17, "uid": "TOP-MATH-ADVANCED-FUNCTIONS",                  "task": "22"},
+            {"order": 18, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM",                 "task": "23,25"},
+            {"order": 19, "uid": "TOP-OGE-GEOMETRICHESKOE-DOKAZATELSTVO-2026",   "task": "24"},
         ],
     },
+    # ==================================================================
+    # ЕГЭ Базовый Математика 2026 — 21 задание (все — краткий ответ)
+    # Спецификация: https://fipi.ru/ege/demoversii-specifikacii-kodifikatory
+    # ==================================================================
     {
         "code": "RU-EGE-BASE-MATH-2026",
         "title": "ЕГЭ Базовый Математика 2026",
@@ -55,16 +77,32 @@ CURRICULA = [
         "language": "ru",
         "status": "active",
         "nodes": [
-            {"order": 1, "uid": "TOP-MATH-NUMBERS-CALCULATIONS",    "task": "1-3"},
-            {"order": 2, "uid": "TOP-MATH-EQUATIONS-SYSTEMS",       "task": "4-5"},
-            {"order": 3, "uid": "TOP-MATH-FUNCTIONS-GRAPHS",        "task": "6-8"},
-            {"order": 4, "uid": "TOP-MATH-DERIVATIVES",             "task": "9"},
-            {"order": 5, "uid": "TOP-MATH-PLANE-GEOMETRY",          "task": "10-12"},
-            {"order": 6, "uid": "TOP-MATH-STEREOMETRY",             "task": "13"},
-            {"order": 7, "uid": "TOP-MATH-PROBABILITY-STATISTICS",  "task": "14-15"},
-            {"order": 8, "uid": "TOP-MATH-APPLIED-MATH",            "task": "16-20"},
+            # Вычисления и преобразования
+            {"order": 1,  "uid": "TOP-MATH-NUMBERS-CALCULATIONS",    "task": "1,15,19"},
+            {"order": 2,  "uid": "TOP-TEKSTOVYE-ZADACHI-004",        "task": "2,20"},
+            {"order": 3,  "uid": "TOP-OGE-ANALIZ-TABLITS-I-DIAGRAMM-2026", "task": "3"},
+            {"order": 4,  "uid": "TOP-EDINITSY-IZMERENIYA-002",      "task": "4"},
+            {"order": 5,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",  "task": "5,8"},
+            # Графики и функции
+            {"order": 6,  "uid": "TOP-MATH-APPLIED-MATH",            "task": "6"},
+            {"order": 7,  "uid": "TOP-MATH-FUNCTIONS-GRAPHS",        "task": "7"},
+            # Планиметрия и стереометрия
+            {"order": 8,  "uid": "TOP-PERIMETR-I-PLOSHCHAD-003",     "task": "9"},
+            {"order": 9,  "uid": "TOP-MATH-PLANE-GEOMETRY",          "task": "10,12"},
+            {"order": 10, "uid": "TOP-MATH-STEREOMETRY",             "task": "11,13"},
+            # Преобразования и уравнения
+            {"order": 11, "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",      "task": "14,16"},
+            {"order": 12, "uid": "TOP-MATH-EQUATIONS-SYSTEMS",       "task": "17"},
+            {"order": 13, "uid": "TOP-MATH-INEQUALITIES",            "task": "18"},
+            # Комплексные задачи
+            {"order": 14, "uid": "TOP-MATH-ADVANCED-ALGEBRA",        "task": "21"},
         ],
     },
+    # ==================================================================
+    # ЕГЭ Профиль Математика 2026 — 19 заданий
+    # Часть 1 (1-12): краткий ответ; Часть 2 (13-19): развёрнутый ответ
+    # Спецификация: https://fipi.ru/ege/demoversii-specifikacii-kodifikatory
+    # ==================================================================
     {
         "code": "RU-EGE-PROF-MATH-2026",
         "title": "ЕГЭ Профиль Математика 2026",
@@ -72,23 +110,26 @@ CURRICULA = [
         "language": "ru",
         "status": "active",
         "nodes": [
-            # Часть 1 (задания 1–12)
-            {"order": 1,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",          "task": "1-3"},
-            {"order": 2,  "uid": "TOP-MATH-TRIGONOMETRY",               "task": "4-6"},
-            {"order": 3,  "uid": "TOP-MATH-EXP-LOG",                    "task": "7-9"},
-            {"order": 4,  "uid": "TOP-MATH-CALCULUS",                   "task": "10-11"},
-            {"order": 5,  "uid": "TOP-MATH-PLANE-GEOMETRY",             "task": "12"},
-            {"order": 6,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",     "task": "1-3"},
-            {"order": 7,  "uid": "TOP-MATH-COMBINATORICS",              "task": "1-3"},
-            # Часть 2 (задания 13–19)
-            {"order": 8,  "uid": "TOP-MATH-ADVANCED-TRIG",              "task": "13"},
-            {"order": 9,  "uid": "TOP-MATH-STEREOMETRY-ADVANCED",       "task": "14"},
-            {"order": 10, "uid": "TOP-MATH-FINANCIAL-ADVANCED",         "task": "15"},
-            {"order": 11, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM-PROOF",  "task": "16"},
-            {"order": 12, "uid": "TOP-MATH-OPTIMIZATION",               "task": "17"},
-            {"order": 13, "uid": "TOP-MATH-COMPLEX-INEQUALITIES",       "task": "18"},
-            {"order": 14, "uid": "TOP-MATH-NUMBER-THEORY",              "task": "19"},
-            {"order": 15, "uid": "TOP-MATH-APPLIED-MATH",               "task": None},
+            # --- Часть 1 (задания 1–12, краткий ответ) ---
+            {"order": 1,  "uid": "TOP-MATH-PLANE-GEOMETRY",              "task": "1"},
+            {"order": 2,  "uid": "TOP-VEKTORY-78d40c",                   "task": "2"},
+            {"order": 3,  "uid": "TOP-MATH-STEREOMETRY",                 "task": "3"},
+            {"order": 4,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",      "task": "4"},
+            {"order": 5,  "uid": "TOP-MATH-COMBINATORICS",               "task": "5"},
+            {"order": 6,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",           "task": "6"},
+            {"order": 7,  "uid": "TOP-MATH-EXP-LOG",                     "task": "7"},
+            {"order": 8,  "uid": "TOP-MATH-DERIVATIVES",                 "task": "8"},
+            {"order": 9,  "uid": "TOP-MATH-APPLIED-MATH",                "task": "9"},
+            {"order": 10, "uid": "TOP-TEKSTOVYE-ZADACHI-004",            "task": "10"},
+            {"order": 11, "uid": "TOP-MATH-FUNCTIONS-GRAPHS",            "task": "11,12"},
+            # --- Часть 2 (задания 13–19, развёрнутый ответ) ---
+            {"order": 13, "uid": "TOP-MATH-ADVANCED-TRIG",               "task": "13"},
+            {"order": 14, "uid": "TOP-MATH-STEREOMETRY-ADVANCED",        "task": "14"},
+            {"order": 15, "uid": "TOP-MATH-COMPLEX-INEQUALITIES",        "task": "15"},
+            {"order": 16, "uid": "TOP-MATH-FINANCIAL-ADVANCED",          "task": "16"},
+            {"order": 17, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM-PROOF",   "task": "17"},
+            {"order": 18, "uid": "TOP-EGE-ZADACHI-S-PARAMETROM-2026",    "task": "18"},
+            {"order": 19, "uid": "TOP-EGE-TEORIYA-CHISEL-DELIMOST-2026", "task": "19"},
         ],
     },
 ]

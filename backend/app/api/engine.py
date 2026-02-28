@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Any, Set
 from enum import Enum
 import json
-import re
 from app.services.graph.neo4j_repo import relation_context, neighbors, get_node_details, get_driver, Neo4jRepo
 from app.config.settings import settings
 from app.services.roadmap_planner import plan_route
@@ -18,6 +17,7 @@ from app.services.reasoning.next_best_topic import next_best_topics
 from app.services.reasoning.mastery_update import update_mastery
 from app.services.curriculum.repo import get_graph_view
 from typing import Dict, List, Optional, Any
+import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from starlette.responses import StreamingResponse
@@ -149,7 +149,7 @@ async def get_topic_methods(topic_uid: str) -> Dict:
     finally:
         repo.close()
 
-    items = [
+    items_raw = [
         {
             "uid":          r.get("uid") or "",
             "title":        r.get("title") or "",
@@ -163,6 +163,47 @@ async def get_topic_methods(topic_uid: str) -> Dict:
         for r in rows
         if r.get("uid")
     ]
+
+    def _tokens(s: str) -> set[str]:
+        parts = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]{3,}", (s or "").lower())
+        stop = {
+            "topic", "top", "the", "and", "for", "with", "this", "that",
+            "метод", "способ", "решение", "задач", "задачи", "тема",
+        }
+        return {p for p in parts if p not in stop}
+
+    def _normalize_ru_stems(words: set[str]) -> set[str]:
+        stems: set[str] = set()
+        for w in words:
+            ww = w
+            for suf in ("иями", "ями", "ами", "иях", "ах", "ях", "ией", "ей", "ий", "ый", "ой", "ая", "ое", "ые", "ие", "ого", "ему", "ому", "ов", "ев", "ом", "ем", "ам", "ям", "ах", "ях", "ы", "и", "а", "я", "е", "о", "у", "ю"):
+                if ww.endswith(suf) and len(ww) - len(suf) >= 4:
+                    ww = ww[: -len(suf)]
+                    break
+            stems.add(ww)
+        return stems
+
+    topic_title = ""
+    if rows:
+        topic_title = str(rows[0].get("topic_title") or "")
+    topic_terms = _normalize_ru_stems(_tokens(f"{topic_uid} {topic_title}"))
+
+    filtered_items: list[dict[str, Any]] = []
+    for item in items_raw:
+        text = " ".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("description") or ""),
+                str(item.get("skill_title") or ""),
+            ]
+        )
+        method_terms = _normalize_ru_stems(_tokens(text))
+        if not topic_terms or topic_terms.intersection(method_terms):
+            filtered_items.append(item)
+
+    # Do not return obviously off-topic methods.
+    # Fallback to raw list only when topic terms cannot be extracted at all.
+    items = filtered_items if topic_terms else items_raw
     return {"items": items, "meta": {"topic_uid": topic_uid, "total": len(items)}}
 
 
@@ -371,10 +412,40 @@ class RoadmapResponse(BaseModel):
 
 @router.post("/roadmap", summary="Build adaptive roadmap", response_model=RoadmapResponse)
 async def roadmap(payload: RoadmapRequest) -> Dict:
+    # When curriculum_code is set, use plan_route for curriculum-aware topic selection
+    if payload.curriculum_code:
+        from app.services.roadmap_planner import plan_route
+        items = plan_route(
+            subject_uid=payload.subject_uid,
+            progress=payload.current_progress or {},
+            limit=payload.limit,
+            curriculum_code=payload.curriculum_code,
+            student_tier=payload.student_tier,
+        )
+        nodes = []
+        for idx, item in enumerate(items):
+            p_val = item.get("mastered", 0.0)
+            if p_val >= 0.85:
+                status = "completed"
+            elif p_val > 0:
+                status = "available"
+            elif idx == 0:
+                status = "available"
+            else:
+                status = "locked"
+            nodes.append(RoadmapNode(
+                topic_uid=item["uid"],
+                title=item["title"],
+                description=None,
+                status=status,
+                progress_percentage=p_val * 100.0,
+            ))
+        return {"nodes": nodes, "personalization_mode": "curriculum"}
+
     # Custom logic to support the "5 nodes + I/We/You Do" requirement
     subject_uid = payload.subject_uid
     progress = payload.current_progress or {}
-    
+
     # 1. Fetch Candidate Topics (limit 20 to give LLM choices)
     topics = []
     rows = []
@@ -2434,3 +2505,93 @@ async def next_question(payload: NextRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Assessment answer history
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/assessment/history/{session_id}",
+    summary="Get assessment question-answer history",
+    responses={404: {"model": ApiError}},
+)
+async def assessment_history(session_id: str):
+    """Return per-question answer history for a completed assessment session."""
+    sess = _get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    asked_uids = sess.get("asked", [])
+    q_details = sess.get("question_details", {})
+
+    items: List[Dict[str, Any]] = []
+    for i, uid in enumerate(asked_uids):
+        qd = q_details.get(uid, {})
+        score = float(qd.get("score", 0.0))
+        user_answer = qd.get("user_answer")
+        correct_data = qd.get("correct_data")
+        options = qd.get("options")
+
+        # Build human-readable correct answer text
+        correct_text = None
+        if correct_data:
+            if isinstance(correct_data, dict):
+                correct_text = (
+                    correct_data.get("correct_answer")
+                    or correct_data.get("value")
+                    or correct_data.get("text")
+                )
+                if correct_text is None and "correct_option_uid" in correct_data and options:
+                    c_uid = correct_data["correct_option_uid"]
+                    for opt in (options if isinstance(options, list) else []):
+                        if isinstance(opt, dict) and opt.get("uid") == c_uid:
+                            correct_text = opt.get("text") or opt.get("label")
+                            break
+                if correct_text is None:
+                    correct_text = str(correct_data)
+            else:
+                correct_text = str(correct_data)
+
+        # Build human-readable user answer text
+        user_text = None
+        if user_answer:
+            if isinstance(user_answer, dict):
+                selected = user_answer.get("selected_option_uids") or []
+                if selected and options:
+                    texts = []
+                    for s_uid in selected:
+                        for opt in (options if isinstance(options, list) else []):
+                            if isinstance(opt, dict) and opt.get("uid") == s_uid:
+                                texts.append(opt.get("text") or opt.get("label") or s_uid)
+                                break
+                        else:
+                            texts.append(s_uid)
+                    user_text = "; ".join(texts)
+                elif user_answer.get("text"):
+                    user_text = str(user_answer["text"])
+                elif user_answer.get("value") is not None:
+                    user_text = str(user_answer["value"])
+                else:
+                    user_text = str(user_answer)
+            else:
+                user_text = str(user_answer)
+
+        items.append({
+            "index": i + 1,
+            "question_uid": uid,
+            "prompt": qd.get("prompt", ""),
+            "question_type": qd.get("type", "unknown"),
+            "difficulty": float(qd.get("difficulty", 5.0)),
+            "user_answer": user_text,
+            "correct_answer": correct_text,
+            "is_correct": score >= 0.5,
+            "score": score,
+        })
+
+    return {
+        "session_id": session_id,
+        "total_questions": len(items),
+        "correct_count": sum(1 for it in items if it["is_correct"]),
+        "items": items,
+    }

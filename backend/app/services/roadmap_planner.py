@@ -74,14 +74,25 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
     tid_filter_node = "WHERE ($tid IS NULL OR t.tenant_id = $tid)"
 
     # Include difficulty_level in query for advanced tier priority bonus
-    if subject_uid:
+    # When curriculum is set and we have allowed_topics, query those directly
+    # (curriculum topics may not be connected via CONTAINS to the Subject)
+    if curriculum_code and allowed_topics:
+        rows = s.run(
+            "UNWIND $uids AS uid MATCH (t:Topic {uid: uid}) "
+            "WHERE ($tid IS NULL OR t.tenant_id = $tid) "
+            "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
+            "RETURN t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
+            "coalesce(t.difficulty_level, 5) AS difficulty_level",
+            {"uids": list(allowed_topics), "tid": tenant_id}
+        ).data()
+    elif subject_uid:
+        # Graph traversal: Subject → Section → Topic OR Subject → Section → Subsection → Topic
         query = (
-            "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(sec:Section)-[:CONTAINS]->(t:Topic) "
-            f"WHERE ($tid IS NULL OR sub.tenant_id = $tid) "
-            "AND ($tid IS NULL OR sec.tenant_id = $tid) "
+            "MATCH (sub:Subject {uid:$su})-[:CONTAINS*2..3]->(t:Topic) "
+            "WHERE ($tid IS NULL OR sub.tenant_id = $tid) "
             "AND ($tid IS NULL OR t.tenant_id = $tid) "
             "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-            "RETURN t.uid AS uid, t.title AS title, collect(pre.uid) AS prereqs, "
+            "RETURN DISTINCT t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
             "coalesce(t.difficulty_level, 5) AS difficulty_level"
         )
         rows = s.run(query, {"su": subject_uid, "tid": tenant_id}).data()
@@ -89,7 +100,7 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
         rows = s.run(
             "MATCH (t:Topic) WHERE ($tid IS NULL OR t.tenant_id = $tid) "
             "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-            "RETURN t.uid AS uid, t.title AS title, collect(pre.uid) AS prereqs, "
+            "RETURN t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
             "coalesce(t.difficulty_level, 5) AS difficulty_level",
             {"tid": tenant_id}
         ).data()
@@ -98,8 +109,6 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
 
     for r in rows:
         tuid = r["uid"]
-        if tuid.startswith("TOP-"):
-            continue
 
         # PRISM FILTER
         if curriculum_code and tuid not in allowed_topics:
@@ -123,6 +132,17 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
         pass
     drv.close()
     items.sort(key=lambda x: x["priority"], reverse=True)
+
+    # When curriculum is set, items are already filtered to curriculum topics only.
+    # Return them directly without fallback searches.
+    if curriculum_code and items:
+        if student_tier in ("gifted", "olympiad"):
+            result = _group_by_branch(items, select_count, progress)
+        else:
+            result = items[:select_count]
+        _roadmap_cache[cache_key] = {"items": result, "progress": dict(progress)}
+        return result
+
     if len(items) >= effective_limit:
         result = items[:effective_limit]
         # Apply branch grouping for gifted/olympiad tiers
@@ -132,16 +152,16 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
             result = result[:select_count]
         _roadmap_cache[cache_key] = {"items": result, "progress": dict(progress)}
         return result
-    
+
     # Fallback search if not enough items
     if subject_uid:
         s2 = neo4j_repo.get_driver().session()
         try:
             more = s2.run(
-                "MATCH (:Section)-[:CONTAINS]->(t:Topic) "
-                "WHERE ($tid IS NULL OR t.tenant_id = $tid) "
+                "MATCH (t:Topic) WHERE ($tid IS NULL OR t.tenant_id = $tid) "
+                "AND (t)<-[:CONTAINS]-() "
                 "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-                "RETURN t.uid AS uid, t.title AS title, collect(pre.uid) AS prereqs, "
+                "RETURN DISTINCT t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
                 "coalesce(t.difficulty_level, 5) AS difficulty_level",
                 {"tid": tenant_id}
             ).data()
@@ -152,7 +172,7 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
                 ...
         for r in more:
             tuid = r["uid"]
-            if tuid.startswith("TOP-"):
+            if curriculum_code and allowed_topics and tuid not in allowed_topics:
                 continue
             if any(it["uid"] == tuid for it in items):
                 continue
