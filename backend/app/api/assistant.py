@@ -88,7 +88,11 @@ async def chat(payload: AssistantChatInput) -> Dict:
         ctx = relation_context(payload.from_uid, payload.to_uid)
         try:
             from openai import AsyncOpenAI
-            oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+            oai = AsyncOpenAI(
+                api_key=settings.openai_api_key.get_secret_value(),
+                max_retries=0,
+                timeout=20.0,
+            )
             messages = [
                 {"role": "system", "content": "Ты эксперт по графу. Объясни, почему существует связь, используя метаданные."},
                 {
@@ -130,7 +134,11 @@ async def chat(payload: AssistantChatInput) -> Dict:
 
     try:
         from openai import AsyncOpenAI
-        oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+        oai = AsyncOpenAI(
+            api_key=settings.openai_api_key.get_secret_value(),
+            max_retries=0,
+            timeout=20.0,
+        )
         messages = [
             {"role": "system", "content": "Ты ассистент платформы KnowledgeBase: помогаешь с графом, планом обучения и вопросами."},
             {"role": "user", "content": payload.message},

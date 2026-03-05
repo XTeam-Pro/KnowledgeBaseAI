@@ -14,7 +14,11 @@ try:
         )
 except Exception:
     pass
-oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+oai = AsyncOpenAI(
+    api_key=settings.openai_api_key.get_secret_value(),
+    max_retries=0,
+    timeout=20.0,
+)
 async def embed_text(text: str) -> List[float]:
     resp = await oai.embeddings.create(model="text-embedding-3-small", input=text)
     return resp.data[0].embedding

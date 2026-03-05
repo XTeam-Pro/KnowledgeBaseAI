@@ -382,7 +382,11 @@ async def chat(payload: ChatInput) -> Dict:
         raise HTTPException(status_code=503, detail="OpenAI client is not available")
 
     ctx = relation_context(payload.from_uid, payload.to_uid, tenant_id=get_tenant_id())
-    oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+    oai = AsyncOpenAI(
+        api_key=settings.openai_api_key.get_secret_value(),
+        max_retries=0,
+        timeout=20.0,
+    )
     messages = [
         {"role": "system", "content": "You are a graph expert. Explain why the relationship exists using provided metadata."},
         {"role": "user", "content": f"Q: {payload.question}\nFrom: {ctx.get('from_title','')} ({payload.from_uid})\nTo: {ctx.get('to_title','')} ({payload.to_uid})\nRelation: {ctx.get('rel','')}\nProps: {ctx.get('props',{})}"},
@@ -535,7 +539,11 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
     if settings.openai_api_key and candidates_info:
         try:
             from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+            client = AsyncOpenAI(
+                api_key=settings.openai_api_key.get_secret_value(),
+                max_retries=0,
+                timeout=20.0,
+            )
             
             prompt = (
                 "You are an adaptive learning AI. Select the best 5-8 topics for a student roadmap from the list below.\n"
@@ -1273,6 +1281,17 @@ def _parse_llm_json_safely(content: str) -> dict:
     return json.loads(text)
 
 
+def _is_rate_limited_llm_error(value: Any) -> bool:
+    text = str(value or "").lower()
+    return (
+        "openai_rate_limited" in text
+        or "openai_rate_limited_cooldown" in text
+        or "429" in text
+        or "too many requests" in text
+        or "rate limit" in text
+    )
+
+
 async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: bool = False, previous_prompts: List[str] = [], difficulty: int = 5) -> Dict:
     # 1. Get Topic Context (Title, Description, Prerequisites, Subject, Skills)
     repo = None
@@ -1508,7 +1527,13 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         try:
             res = await openai_chat_async(messages, temperature=0.9)
             if not res.get("ok"):
-                 raise Exception("LLM generation failed")
+                err = res.get("error") or "LLM generation failed"
+                if _is_rate_limited_llm_error(err):
+                    raise HTTPException(
+                        status_code=503,
+                        detail="LLM is temporarily rate-limited. Try again shortly.",
+                    )
+                raise Exception(f"LLM generation failed: {err}")
             
             content = res.get("content", "")
             raw_content = content
@@ -1589,7 +1614,8 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             break
 
         except Exception as e:
-            if attempt == 1: raise e
+            if attempt == 1 or _is_rate_limited_llm_error(e):
+                raise e
             logger.warning("llm_parsing_error", error=str(e), action="retrying")
             pass
 
@@ -1986,6 +2012,87 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
         s = re.sub(r"\s+", " ", s).strip()
         return s
 
+    def numbers_close(lhs: Any, rhs: Any) -> bool:
+        lv = parse_number(lhs)
+        rv = parse_number(rhs)
+        if lv is None or rv is None:
+            return False
+        is_close_rel = abs(lv - rv) <= 0.02 * max(abs(rv), 1.0)
+        is_close_abs = abs(lv - rv) < 0.02
+        return bool(is_close_rel or is_close_abs)
+
+    def _normalize_time_token(token: str) -> Optional[str]:
+        m = re.match(r"^\s*(\d{1,2})[:.](\d{2})\s*$", str(token))
+        if not m:
+            return None
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+            return None
+        return f"{hh}:{mm:02d}"
+
+    def extract_time_tokens(val: Any) -> List[str]:
+        if val is None:
+            return []
+        text = str(val)
+        out: List[str] = []
+        for raw in re.findall(r"(?<!\d)\d{1,2}[:.]\d{2}(?!\d)", text):
+            norm = _normalize_time_token(raw)
+            if norm and norm not in out:
+                out.append(norm)
+        return out
+
+    def _canonical_number_token(raw: str) -> Optional[str]:
+        v = parse_number(raw)
+        if v is None:
+            return None
+        if abs(v) < 1e-12:
+            v = 0.0
+        s = f"{v:.10f}".rstrip("0").rstrip(".")
+        return s or "0"
+
+    def extract_numeric_tokens(val: Any) -> List[str]:
+        if val is None:
+            return []
+        text = str(val).replace("−", "-")
+        # Avoid splitting time-like values into two numbers (e.g., 9:45).
+        text = re.sub(r"(?<!\d)\d{1,2}[:.]\d{2}(?!\d)", " ", text)
+        raws = re.findall(r"[+-]?\d+(?:[.,]\d+)?(?:/[+-]?\d+(?:[.,]\d+)?)?", text)
+        out: List[str] = []
+        for tok in raws:
+            canon = _canonical_number_token(tok)
+            if canon and canon not in out:
+                out.append(canon)
+        return out
+
+    def _extract_var_assignments(val: Any) -> Set[tuple]:
+        if val is None:
+            return set()
+        trans = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+        text = str(val).translate(trans).replace("−", "-")
+        pairs = set()
+        for var, raw_num in re.findall(
+            r"([a-zа-я])(?:\s*[_]?\s*\d+)?\s*=\s*([+-]?\d+(?:[.,]\d+)?(?:/[+-]?\d+(?:[.,]\d+)?)?)",
+            text.lower(),
+        ):
+            canon = _canonical_number_token(raw_num)
+            if canon is not None:
+                pairs.add((var, canon))
+        return pairs
+
+    def _final_answer_segment(correct_text: str) -> str:
+        if not correct_text:
+            return ""
+        m = re.search(
+            r"(?:^|\s)(?:ответ|answer)\s*[:\-]\s*(.+)$",
+            correct_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            return m.group(1).strip()
+        parts = [p.strip() for p in re.split(r"[.\n;]+", correct_text) if p and p.strip()]
+        return parts[-1] if parts else correct_text
+
     def parse_bool(val: Any) -> Optional[bool]:
         s = normalize_text(val)
         if not s:
@@ -2038,13 +2145,7 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
                     correct_val = parse_number(cd["correct_value"])
             
             if correct_val is not None:
-                # Allow relaxed epsilon error (1% or 0.01 absolute)
-                # For 4/9 (~0.444), 0.44 should be acceptable? Maybe 0.44 is 1% off.
-                # 0.44 vs 0.4444: diff 0.0044 (~1%). 
-                # Let's use 2% relative error or 0.02 absolute for robustness
-                is_close_rel = abs(user_val - correct_val) <= 0.02 * max(abs(correct_val), 1.0)
-                is_close_abs = abs(user_val - correct_val) < 0.02
-                return 1.0 if (is_close_rel or is_close_abs) else 0.0
+                return 1.0 if numbers_close(user_val, correct_val) else 0.0
             
             return 0.0
         except Exception:
@@ -2052,14 +2153,30 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
 
     # 3. Check Free Text
     if answer.text:
-        text = str(answer.text).strip().replace(',', '.')  # normalize comma-decimal
+        text = str(answer.text).strip()
         if len(text) < 1:
             return 0.0
-            
+
+        normalized_user_text = normalize_text(text)
+        if normalized_user_text in {"idk", "i dont know", "не знаю", "я не знаю", "__idk__"}:
+            return 0.0
+
         # Try to match with correct_value if exists
         if question_data and question_data.get("correct_data"):
             cd = question_data["correct_data"]
-            correct_val_str = str(cd.get("correct_value", "")).strip()
+            correct_val = None
+            if isinstance(cd, dict):
+                correct_val = cd.get("correct_value")
+                if correct_val is None:
+                    correct_val = cd.get("correct_answer")
+                if correct_val is None:
+                    correct_val = cd.get("answer")
+
+            correct_val_str = str(correct_val).strip() if correct_val is not None else ""
+            if not correct_val_str:
+                return 0.0
+
+            normalized_correct_text = normalize_text(correct_val_str)
 
             # 0. Semantic boolean match for "верно/неверно", "да/нет", true/false.
             user_bool = parse_bool(text)
@@ -2067,32 +2184,58 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
             if user_bool is not None and correct_bool is not None:
                 return 1.0 if user_bool == correct_bool else 0.0
 
-            # 1. Exact/Fuzzy String Match
-            if normalize_text(text) == normalize_text(correct_val_str):
+            # 1. Exact/Fuzzy string match
+            if normalized_user_text == normalized_correct_text:
                 return 1.0
-                
-            # 2. Numeric Comparison (Parsing fractions)
-            val_user = parse_number(text)
-            val_correct = parse_number(correct_val_str)
+            if len(normalized_user_text) >= 6 and (
+                normalized_user_text in normalized_correct_text
+                or normalized_correct_text in normalized_user_text
+            ):
+                return 1.0
 
-            # 2b. If correct_val_str is a full solution (e.g. "2x+5=17 => x=6. Ответ: 6."),
-            # try to extract the final answer number (after "Ответ:" or last standalone number).
-            if val_user is not None and val_correct is None and correct_val_str:
-                # Try "Ответ: N" pattern first
-                ot_match = re.search(r"[Оо]твет[:\s]+([+-]?\d+(?:[.,]\d+)?)", correct_val_str)
-                if ot_match:
-                    val_correct = parse_number(ot_match.group(1))
-                else:
-                    # Fallback: extract all numbers and use the last one
-                    nums = re.findall(r"[+-]?\d+(?:[.,]\d+)?", correct_val_str)
-                    if nums:
-                        val_correct = parse_number(nums[-1])
+            # 2. Variable assignment equivalence (x=2, y=3 forms)
+            user_assign = _extract_var_assignments(text)
+            correct_assign = _extract_var_assignments(correct_val_str)
+            if user_assign and correct_assign:
+                return 1.0 if user_assign.issubset(correct_assign) else 0.0
 
-            if val_user is not None and val_correct is not None:
-                # Same relaxed logic as numeric
-                is_close_rel = abs(val_user - val_correct) <= 0.02 * max(abs(val_correct), 1.0)
-                is_close_abs = abs(val_user - val_correct) < 0.02
-                return 1.0 if (is_close_rel or is_close_abs) else 0.0
+            # 3. Time equivalence (9:45 == 9.45 in this context)
+            user_times = extract_time_tokens(text)
+            correct_times = extract_time_tokens(correct_val_str)
+            if user_times and correct_times:
+                return 1.0 if set(user_times).issubset(set(correct_times)) else 0.0
+
+            # 4. Numeric comparison (including multi-number answers)
+            user_nums = extract_numeric_tokens(text)
+            if user_nums:
+                answer_segment = _final_answer_segment(correct_val_str)
+                seg_nums = extract_numeric_tokens(answer_segment)
+                corr_nums = extract_numeric_tokens(correct_val_str)
+
+                # Single-number user answers: compare with explicit/final answer number.
+                if len(user_nums) == 1:
+                    user_num = user_nums[0]
+                    candidate_nums: List[str] = []
+                    if "=" in answer_segment:
+                        candidate_nums.extend(extract_numeric_tokens(answer_segment.split("=")[-1]))
+                    if seg_nums:
+                        candidate_nums.append(seg_nums[-1])
+                    if not candidate_nums and corr_nums:
+                        candidate_nums.append(corr_nums[-1])
+                    for candidate in candidate_nums:
+                        if numbers_close(user_num, candidate):
+                            return 1.0
+                    return 0.0
+
+                # Multi-number answers (sets of roots/angles/etc.)
+                user_set = set(user_nums)
+                if seg_nums and user_set.issubset(set(seg_nums)):
+                    return 1.0
+                prompt_txt = str((question_data or {}).get("prompt") or "")
+                if re.search(r"\b(все|остальные|найдите все|перечислите)\b", normalize_text(prompt_txt)):
+                    if user_set.issubset(set(corr_nums)):
+                        return 1.0
+                return 0.0
 
         return 0.0
 
@@ -2171,29 +2314,41 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
     qpt = sess.setdefault("questions_per_topic", {})
     qpt[topic_uid] = qpt.get(topic_uid, 0) + 1
 
-    try:
+    async def _select_non_duplicate(min_d: int, max_d: int, blocked_uids: Set[str]) -> Optional[Dict]:
         previous_prompts = sess.get("asked_prompts", [])
-        q = await _select_question(topic_uid, d, d, set(sess["asked"]), previous_prompts=previous_prompts)
+        local_blocked = set(blocked_uids)
+        for _ in range(3):
+            candidate = await _select_question(
+                topic_uid,
+                min_d,
+                max_d,
+                local_blocked,
+                previous_prompts=previous_prompts,
+            )
+            if not candidate:
+                return None
+            cand_uid = str(candidate.get("question_uid") or "").strip()
+            if cand_uid and cand_uid not in blocked_uids:
+                return candidate
+            if cand_uid:
+                local_blocked.add(cand_uid)
+        return None
+
+    asked_uids = set(sess.get("asked", []))
+    try:
+        q = await _select_non_duplicate(d, d, asked_uids)
     except Exception as e:
         logger.warning("question_selection_error", error=str(e))
         # Try fallback to standard difficulty if specific difficulty fails
         try:
-            previous_prompts = sess.get("asked_prompts", [])
-            q = await _select_question(topic_uid, 3, 3, set(sess["asked"]), previous_prompts=previous_prompts)
+            q = await _select_non_duplicate(3, 3, asked_uids)
         except Exception:
             q = None
 
     if not q:
         # Last resort: widen difficulty, but still exclude already asked question UIDs.
         try:
-            previous_prompts = sess.get("asked_prompts", [])
-            q = await _select_question(
-                topic_uid,
-                max(1, d - 1),
-                min(10, d + 1),
-                set(sess["asked"]),
-                previous_prompts=previous_prompts,
-            )
+            q = await _select_non_duplicate(max(1, d - 1), min(10, d + 1), asked_uids)
         except Exception:
             q = None
         if not q:
@@ -2240,12 +2395,19 @@ async def next_question(payload: NextRequest):
         if "question_details" in sess and payload.question_uid in sess["question_details"]:
             q_data = sess["question_details"][payload.question_uid]
             
-        score = _evaluate(payload.answer, q_data)
-        if score >= 0.5:
-            sess["good"] += 1
+        already_answered = payload.question_uid in (sess.get("asked") or [])
+        if already_answered:
+            logger.warning("duplicate_question_submission", question_uid=payload.question_uid, session_id=sid)
+            score = float((q_data or {}).get("score", 0.0))
+            if not q_data or "score" not in q_data:
+                score = _evaluate(payload.answer, q_data)
         else:
-            sess["bad"] += 1
-        sess["asked"].append(payload.question_uid)
+            score = _evaluate(payload.answer, q_data)
+            if score >= 0.5:
+                sess["good"] += 1
+            else:
+                sess["bad"] += 1
+            sess["asked"].append(payload.question_uid)
         
         # Save user answer
         if "question_details" in sess and payload.question_uid in sess["question_details"]:
@@ -2287,7 +2449,7 @@ async def next_question(payload: NextRequest):
         async def _stream():
             try:
                 yield "event: ack\n"
-                yield "data: " + json.dumps({"items": [{"accepted": True}], "meta": {}, "is_correct": is_correct, "score": round(answer_score, 4)}) + "\n\n"
+                yield "data: " + json.dumps({"accepted": True, "meta": {}, "is_correct": is_correct, "score": round(answer_score, 4)}, ensure_ascii=False) + "\n\n"
                 if done_by_min or done_by_max:
                     # Precise Score Calculation
                     # Calculate weighted score based on difficulty
@@ -2591,7 +2753,10 @@ async def assessment_history(session_id: str):
 
         # 2. Free text answer
         if user_answer.get("text"):
-            return str(user_answer["text"])
+            text = str(user_answer["text"])
+            if text.strip().lower() == "__idk__":
+                return "Я не знаю"
+            return text
 
         # 3. Numeric value (skip sentinel 0 when no other data)
         val = user_answer.get("value")
@@ -2601,18 +2766,26 @@ async def assessment_history(session_id: str):
         return None
 
     items: List[Dict[str, Any]] = []
-    for i, uid in enumerate(asked_uids):
+    seen_uids: Set[str] = set()
+    for uid in asked_uids:
+        if uid in seen_uids:
+            continue
+        seen_uids.add(uid)
         qd = q_details.get(uid, {})
         score = float(qd.get("score", 0.0))
         user_answer = qd.get("user_answer")
+        if not user_answer:
+            continue
         correct_data = qd.get("correct_data")
         options = qd.get("options")
 
         correct_text = _resolve_correct_text(correct_data, options)
         user_text = _resolve_user_text(user_answer, options)
+        if user_text is None:
+            continue
 
         items.append({
-            "index": i + 1,
+            "index": len(items) + 1,
             "question_uid": uid,
             "prompt": qd.get("prompt", ""),
             "question_type": qd.get("type", "unknown"),

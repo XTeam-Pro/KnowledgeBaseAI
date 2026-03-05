@@ -48,7 +48,11 @@ async def generate_concepts_and_skills(topic: str, language: str) -> GeneratedBu
         from openai import AsyncOpenAI
     except Exception:
         return GeneratedBundle(concepts=[], skills=[])
-    oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+    oai = AsyncOpenAI(
+        api_key=settings.openai_api_key.get_secret_value(),
+        max_retries=0,
+        timeout=20.0,
+    )
     messages = [
         {"role": "system", "content": "Return structured JSON for concepts and skills in the target language."},
         {"role": "user", "content": f"topic={topic}; lang={language}"},
