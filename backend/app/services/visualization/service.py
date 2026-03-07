@@ -25,7 +25,7 @@ class VisualizationService:
         prompt = VisualizationService._build_prompt(topic_uid, prereqs, difficulty, user_context)
         
         # Retry loop for consistency
-        max_retries = 3
+        max_retries = 2
         last_error = None
         
         for attempt in range(max_retries):

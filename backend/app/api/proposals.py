@@ -1,11 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends, Header, Security
+from fastapi import APIRouter, HTTPException, Depends, Header, Security, Query
 from fastapi.security import HTTPBearer
 from typing import Dict, Optional, List
 from pydantic import BaseModel, Field
 from app.schemas.proposal import Proposal, Operation, ProposalStatus
 from app.db.pg import get_conn, ensure_tables
 from app.services.proposal_service import create_draft_proposal
-from app.core.context import get_tenant_id
+from app.core.context import get_tenant_id, set_tenant_id
 from app.workers.commit import commit_proposal
 from app.db.pg import get_proposal, set_proposal_status, list_proposals
 from app.services.diff import build_diff
@@ -14,10 +14,18 @@ from app.api.common import StandardResponse
 
 router = APIRouter(prefix="/v1/proposals", tags=["Управление контентом"], dependencies=[Security(HTTPBearer())])
 
-def require_tenant() -> str:
-    tid = get_tenant_id()
+def require_tenant(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+    tenant_id: str | None = Query(default=None, alias="tenant_id"),
+) -> str:
+    tid = x_tenant_id or tenant_id or get_tenant_id()
     if not tid:
         raise HTTPException(status_code=400, detail="tenant_id missing")
+    tid = tid.strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="tenant_id missing")
+    # Keep tenant context consistent for downstream services/workers.
+    set_tenant_id(tid)
     return tid
 
 class CreateProposalResponse(BaseModel):

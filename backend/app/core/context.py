@@ -16,6 +16,9 @@ def extract_tenant_id_from_request(request: Request) -> Optional[str]:
     h = request.headers.get("X-Tenant-ID")
     if h:
         return h.strip() or None
+    q = request.query_params.get("tenant_id") or request.query_params.get("tid")
+    if q:
+        return q.strip() or None
     auth = request.headers.get("Authorization") or ""
     if auth.lower().startswith("bearer "):
         token = auth.split(" ", 1)[1].strip()

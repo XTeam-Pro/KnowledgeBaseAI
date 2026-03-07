@@ -8,6 +8,18 @@ from app.config.settings import settings
 _RATE_LIMIT_COOLDOWN_UNTIL: float = 0.0
 _DEFAULT_RATE_LIMIT_COOLDOWN_SEC: float = 4.0
 
+# Singleton client — created once per process, reused across all calls
+_openai_client = None
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        from openai import AsyncOpenAI
+        api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else ""
+        _openai_client = AsyncOpenAI(api_key=api_key, max_retries=0, timeout=20.0)
+    return _openai_client
+
 
 def _is_rate_limited_error(exc: Exception) -> bool:
     msg = str(exc).lower()
@@ -35,8 +47,6 @@ async def openai_chat_async(
     messages: list[dict[str, str]],
     temperature: float = 0.2,
     model: str = "gpt-4o-mini",
-    request_timeout: float = 20.0,
-    max_retries: int = 0,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Async OpenAI chat wrapper used by legacy KB services.
@@ -59,13 +69,7 @@ async def openai_chat_async(
         }
 
     try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key=api_key,
-            max_retries=max_retries,
-            timeout=request_timeout,
-        )
+        client = _get_openai_client()
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,
