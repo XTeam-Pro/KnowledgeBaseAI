@@ -4,9 +4,13 @@ import time
 from typing import Any
 
 from app.config.settings import settings
+from app.core.logging import logger
 
 _RATE_LIMIT_COOLDOWN_UNTIL: float = 0.0
 _DEFAULT_RATE_LIMIT_COOLDOWN_SEC: float = 4.0
+_DEFAULT_MAX_TOKENS: int = 600
+_MAX_TOKENS_CAP: int = 650
+_FAST_MODEL: str = "gpt-4o-mini"
 
 # Singleton client — created once per process, reused across all calls
 _openai_client = None
@@ -46,7 +50,9 @@ def _extract_retry_after_seconds(exc: Exception) -> float:
 async def openai_chat_async(
     messages: list[dict[str, str]],
     temperature: float = 0.2,
-    model: str = "gpt-4o-mini",
+    model: str = _FAST_MODEL,
+    feature: str = "unknown",
+    max_tokens: int | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Async OpenAI chat wrapper used by legacy KB services.
@@ -70,15 +76,42 @@ async def openai_chat_async(
 
     try:
         client = _get_openai_client()
+        requested_model = model or _FAST_MODEL
+        model_to_use = _FAST_MODEL if requested_model != _FAST_MODEL else requested_model
+        max_tokens_to_use = int(max_tokens or kwargs.pop("max_tokens", _DEFAULT_MAX_TOKENS))
+        max_tokens_to_use = max(1, min(max_tokens_to_use, _MAX_TOKENS_CAP))
         resp = await client.chat.completions.create(
-            model=model,
+            model=model_to_use,
             messages=messages,
             temperature=temperature,
+            max_tokens=max_tokens_to_use,
             **kwargs,
         )
         content = (resp.choices[0].message.content or "").strip()
+        usage_obj = getattr(resp, "usage", None)
+        usage = {
+            "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
+        }
+        if not usage["total_tokens"]:
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        logger.info(
+            "llm_usage",
+            feature=feature,
+            model=model_to_use,
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            total_tokens=usage["total_tokens"],
+        )
         _RATE_LIMIT_COOLDOWN_UNTIL = 0.0
-        return {"ok": True, "content": content}
+        return {
+            "ok": True,
+            "content": content,
+            "usage": usage,
+            "model": model_to_use,
+            "feature": feature,
+        }
     except Exception as exc:
         if _is_rate_limited_error(exc):
             retry_after = _extract_retry_after_seconds(exc)

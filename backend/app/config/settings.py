@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     pg_dsn: PostgresDsn | str = Field(default="", alias="PG_DSN", validation_alias="PG_DSN")
 
     openai_api_key: SecretStr = Field(default=SecretStr(""), alias="OPENAI_API_KEY")
+    gigachat_credentials: str = Field(default="", alias="GIGACHAT_CREDENTIALS")
 
     neo4j_uri: str = Field(default="", alias="KB_NEO4J_URI")
     neo4j_user: str = Field(default="", alias="NEO4J_USER")
@@ -42,6 +43,7 @@ class Settings(BaseSettings):
     cors_allow_origins: str = Field(default="", alias="CORS_ALLOW_ORIGINS")
 
     admin_api_key: SecretStr = Field(default=SecretStr(""), alias="ADMIN_API_KEY")
+    kb_api_key: SecretStr = Field(default=SecretStr(""), alias="KB_API_KEY")
 
     jwt_secret_key: SecretStr = Field(default=SecretStr(""), alias="JWT_SECRET_KEY")
     jwt_access_ttl_seconds: int = Field(default=900, alias="JWT_ACCESS_TTL_SECONDS")

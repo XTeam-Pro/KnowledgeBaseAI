@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Any, Set
 from enum import Enum
@@ -35,6 +35,75 @@ import base64
 
 router = APIRouter()
 
+_ROADMAP_CACHE_TTL_SECONDS = 900
+
+
+def _request_scope(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _enforce_rate_limit(request: Request, *, route_key: str, limit: int, window_sec: int = 60) -> None:
+    """Simple fixed-window limiter backed by Redis."""
+    try:
+        r = get_redis()
+        key = f"rl:{route_key}:{_request_scope(request)}"
+        current = int(r.incr(key))
+        if current == 1:
+            r.expire(key, window_sec)
+        if current > limit:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded, please try again later.")
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail-open to avoid breaking core flows if Redis is unavailable.
+        return
+
+
+def _roadmap_cache_key(payload: "RoadmapRequest", progress: dict[str, float]) -> str:
+    compact_progress = sorted(
+        ((k, round(float(v or 0.0), 3)) for k, v in (progress or {}).items()),
+        key=lambda kv: kv[0],
+    )[:40]
+    raw = json.dumps(
+        {
+            "subject_uid": payload.subject_uid,
+            "focus_topic_uid": payload.focus_topic_uid,
+            "limit": payload.limit,
+            "curriculum_code": payload.curriculum_code,
+            "student_tier": payload.student_tier,
+            "progress": compact_progress,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"roadmap:v3:{zlib.crc32(raw.encode('utf-8')):08x}"
+
+
+def _roadmap_cache_get(cache_key: str) -> Optional[Dict[str, Any]]:
+    try:
+        r = get_redis()
+        raw = r.get(cache_key)
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _roadmap_cache_set(cache_key: str, value: Dict[str, Any]) -> None:
+    try:
+        r = get_redis()
+        r.setex(cache_key, _ROADMAP_CACHE_TTL_SECONDS, json.dumps(value, ensure_ascii=False))
+    except Exception:
+        return
+
 # --- Graph / Viewport ---
 
 class NodeDTO(BaseModel):
@@ -63,12 +132,14 @@ async def get_node(uid: str) -> Dict:
 
 
 @router.get("/method/{method_uid}", response_model=StandardResponse, summary="Get Method node + examples")
-async def get_method(method_uid: str) -> Dict:
+async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
     """Return a Method node with its examples and parent skill/topic context.
 
     Used by StudyNinja-API to generate GRR micro-lessons anchored to one Method.
     Query traversal: Topic ← [:REQUIRES_SKILL] ← Skill ← [:HAS_METHOD] ← Method
     Examples are fetched from Method → HAS_EXAMPLE → Example.
+
+    If ``user_class`` is provided, only examples appropriate for that grade are returned.
     """
     repo = Neo4jRepo()
     try:
@@ -78,21 +149,32 @@ async def get_method(method_uid: str) -> Dict:
             OPTIONAL MATCH (sk:Skill)-[:HAS_METHOD]->(m)
             OPTIONAL MATCH (t:Topic)-[:REQUIRES_SKILL]->(sk)
             OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
+                WHERE ($user_class IS NULL
+                       OR (
+                           (ex.user_class_min IS NULL OR ex.user_class_min <= $user_class)
+                           AND
+                           (ex.user_class_max IS NULL OR ex.user_class_max >= $user_class)
+                       ))
             RETURN
-                m.uid          AS uid,
-                m.title        AS title,
-                m.description  AS description,
-                m.algorithm    AS algorithm,
-                sk.uid         AS skill_uid,
-                sk.title       AS skill_title,
-                t.uid          AS topic_uid,
-                t.title        AS topic_title,
+                m.uid            AS uid,
+                m.title          AS title,
+                m.description    AS description,
+                m.algorithm      AS algorithm,
+                m.user_class_min AS user_class_min,
+                m.user_class_max AS user_class_max,
+                sk.uid           AS skill_uid,
+                sk.title         AS skill_title,
+                t.uid            AS topic_uid,
+                t.title          AS topic_title,
                 collect(DISTINCT {
                     uid: ex.uid, title: ex.title,
-                    statement: ex.statement, difficulty: ex.difficulty_level
+                    statement: ex.statement, solution: ex.solution,
+                    difficulty: ex.difficulty_level,
+                    user_class_min: ex.user_class_min,
+                    user_class_max: ex.user_class_max
                 }) AS method_examples
             """,
-            {"uid": method_uid},
+            {"uid": method_uid, "user_class": user_class},
         )
     finally:
         repo.close()
@@ -106,104 +188,84 @@ async def get_method(method_uid: str) -> Dict:
 
     return {
         "items": [{
-            "uid":         r.get("uid") or method_uid,
-            "title":       r.get("title") or "",
-            "description": r.get("description") or "",
-            "algorithm":   r.get("algorithm") or "",
-            "skill_uid":   r.get("skill_uid") or "",
-            "skill_title": r.get("skill_title") or "",
-            "topic_uid":   r.get("topic_uid") or "",
-            "topic_title": r.get("topic_title") or "",
-            "examples":    examples,
+            "uid":            r.get("uid") or method_uid,
+            "title":          r.get("title") or "",
+            "description":    r.get("description") or "",
+            "algorithm":      r.get("algorithm") or "",
+            "user_class_min": r.get("user_class_min"),
+            "user_class_max": r.get("user_class_max"),
+            "skill_uid":      r.get("skill_uid") or "",
+            "skill_title":    r.get("skill_title") or "",
+            "topic_uid":      r.get("topic_uid") or "",
+            "topic_title":    r.get("topic_title") or "",
+            "examples":       examples,
         }],
         "meta": {},
     }
 
 @router.get("/topic/{topic_uid}/methods", response_model=StandardResponse, summary="List Methods for a Topic")
-async def get_topic_methods(topic_uid: str) -> Dict:
+async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) -> Dict:
     """Return all Method nodes reachable from a Topic via Topic→REQUIRES_SKILL→Skill→HAS_METHOD→Method.
 
     Used by the frontend to discover which Method UIDs are available for a Topic
     before calling /stage/start with kb_unit_uid=method_uid.
+
+    If ``user_class`` is provided (1-11), only Methods whose class range includes
+    the given grade are returned (NULL boundaries are treated as "no restriction").
     """
     repo = Neo4jRepo()
     try:
-        rows = repo.read(
-            """
+        cypher = """
             MATCH (t:Topic {uid: $uid})-[:REQUIRES_SKILL]->(sk:Skill)-[:HAS_METHOD]->(m:Method)
+            WHERE ($user_class IS NULL
+                   OR (
+                       (m.user_class_min IS NULL OR m.user_class_min <= $user_class)
+                       AND
+                       (m.user_class_max IS NULL OR m.user_class_max >= $user_class)
+                   ))
             OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
             WITH t, sk, m, count(ex) AS example_count
             RETURN
                 m.uid          AS uid,
                 m.title        AS title,
                 m.description  AS description,
+                m.user_class_min AS user_class_min,
+                m.user_class_max AS user_class_max,
                 sk.uid         AS skill_uid,
                 sk.title       AS skill_title,
                 t.uid          AS topic_uid,
                 t.title        AS topic_title,
                 example_count
-            ORDER BY m.title ASC
-            """,
-            {"uid": topic_uid},
-        )
+            ORDER BY m.user_class_min ASC NULLS FIRST, m.title ASC
+            """
+        rows = repo.read(cypher, {"uid": topic_uid, "user_class": user_class})
     finally:
         repo.close()
 
-    items_raw = [
+    items = [
         {
-            "uid":          r.get("uid") or "",
-            "title":        r.get("title") or "",
-            "description":  r.get("description") or "",
-            "skill_uid":    r.get("skill_uid") or "",
-            "skill_title":  r.get("skill_title") or "",
-            "topic_uid":    r.get("topic_uid") or topic_uid,
-            "topic_title":  r.get("topic_title") or "",
-            "example_count": r.get("example_count") or 0,
+            "uid":            r.get("uid") or "",
+            "title":          r.get("title") or "",
+            "description":    r.get("description") or "",
+            "user_class_min": r.get("user_class_min"),
+            "user_class_max": r.get("user_class_max"),
+            "skill_uid":      r.get("skill_uid") or "",
+            "skill_title":    r.get("skill_title") or "",
+            "topic_uid":      r.get("topic_uid") or topic_uid,
+            "topic_title":    r.get("topic_title") or "",
+            "example_count":  r.get("example_count") or 0,
         }
         for r in rows
         if r.get("uid")
     ]
 
-    def _tokens(s: str) -> set[str]:
-        parts = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]{3,}", (s or "").lower())
-        stop = {
-            "topic", "top", "the", "and", "for", "with", "this", "that",
-            "метод", "способ", "решение", "задач", "задачи", "тема",
-        }
-        return {p for p in parts if p not in stop}
+    # NOTE: semantic text-stemming filter was removed.  The Cypher path
+    # Topic→REQUIRES_SKILL→Skill→HAS_METHOD→Method already guarantees
+    # relevance via the graph structure; the old text filter used a
+    # naive Russian stemmer that could incorrectly drop valid methods
+    # (e.g. when method description wording didn't overlap with the
+    # topic title).
 
-    def _normalize_ru_stems(words: set[str]) -> set[str]:
-        stems: set[str] = set()
-        for w in words:
-            ww = w
-            for suf in ("иями", "ями", "ами", "иях", "ах", "ях", "ией", "ей", "ий", "ый", "ой", "ая", "ое", "ые", "ие", "ого", "ему", "ому", "ов", "ев", "ом", "ем", "ам", "ям", "ах", "ях", "ы", "и", "а", "я", "е", "о", "у", "ю"):
-                if ww.endswith(suf) and len(ww) - len(suf) >= 4:
-                    ww = ww[: -len(suf)]
-                    break
-            stems.add(ww)
-        return stems
-
-    topic_title = ""
-    if rows:
-        topic_title = str(rows[0].get("topic_title") or "")
-    topic_terms = _normalize_ru_stems(_tokens(f"{topic_uid} {topic_title}"))
-
-    filtered_items: list[dict[str, Any]] = []
-    for item in items_raw:
-        text = " ".join(
-            [
-                str(item.get("title") or ""),
-                str(item.get("description") or ""),
-                str(item.get("skill_title") or ""),
-            ]
-        )
-        method_terms = _normalize_ru_stems(_tokens(text))
-        if not topic_terms or topic_terms.intersection(method_terms):
-            filtered_items.append(item)
-
-    # Do not return obviously off-topic methods.
-    # Fallback to raw list only when topic terms cannot be extracted at all.
-    items = filtered_items if topic_terms else items_raw
     return {"items": items, "meta": {"topic_uid": topic_uid, "total": len(items)}}
 
 
@@ -374,32 +436,46 @@ class ChatResponse(BaseModel):
     context: Dict = {}
 
 @router.post("/chat", summary="Explain relationship (RAG)", response_model=ChatResponse)
-async def chat(payload: ChatInput) -> Dict:
+async def chat(payload: ChatInput, request: Request) -> Dict:
+    _enforce_rate_limit(request, route_key="engine_chat", limit=40, window_sec=60)
+
+    # Redis cache for relation chat (saves ~40-50% LLM calls)
+    import hashlib as _hl
+    _q_hash = _hl.sha256(payload.question.encode()).hexdigest()[:12]
+    _rel_cache_key = f"rel_chat:{payload.from_uid}:{payload.to_uid}:{_q_hash}"
     try:
-        from openai import AsyncOpenAI
-        from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
+        _rc = _get_q_cache_client()
+        _cached = await _rc.get(_rel_cache_key)
+        if _cached:
+            _cached_data = json.loads(_cached)
+            return _cached_data
     except Exception:
-        raise HTTPException(status_code=503, detail="OpenAI client is not available")
+        pass
 
     ctx = relation_context(payload.from_uid, payload.to_uid, tenant_id=get_tenant_id())
-    oai = AsyncOpenAI(
-        api_key=settings.openai_api_key.get_secret_value(),
-        max_retries=0,
-        timeout=20.0,
-    )
     messages = [
         {"role": "system", "content": "You are a graph expert. Explain why the relationship exists using provided metadata."},
         {"role": "user", "content": f"Q: {payload.question}\nFrom: {ctx.get('from_title','')} ({payload.from_uid})\nTo: {ctx.get('to_title','')} ({payload.to_uid})\nRelation: {ctx.get('rel','')}\nProps: {ctx.get('props',{})}"},
     ]
 
-    try:
-        resp = await oai.chat.completions.create(model="gpt-4o-mini", messages=messages)
-    except Exception:
+    resp = await openai_chat_async(
+        messages,
+        temperature=0.2,
+        model="gpt-4o-mini",
+        feature="engine_relation_chat",
+        max_tokens=350,
+    )
+    if not resp.get("ok"):
         raise HTTPException(status_code=502, detail="OpenAI request failed")
+    result = {"answer": resp.get("content", ""), "usage": resp.get("usage"), "context": ctx}
 
-    usage = resp.usage or None
-    answer = resp.choices[0].message.content if resp.choices else ""
-    return {"answer": answer, "usage": (usage.model_dump() if hasattr(usage, 'model_dump') else None), "context": ctx}
+    # Cache for 4 hours
+    try:
+        await _rc.set(_rel_cache_key, json.dumps(result, ensure_ascii=False), ex=14400)
+    except Exception:
+        pass
+
+    return result
 
 # --- Roadmap ---
 
@@ -415,7 +491,8 @@ class RoadmapResponse(BaseModel):
     personalization_mode: str = "llm"
 
 @router.post("/roadmap", summary="Build adaptive roadmap", response_model=RoadmapResponse)
-async def roadmap(payload: RoadmapRequest) -> Dict:
+async def roadmap(payload: RoadmapRequest, request: Request) -> Dict:
+    _enforce_rate_limit(request, route_key="engine_roadmap", limit=30, window_sec=60)
     # When curriculum_code is set, use plan_route for curriculum-aware topic selection
     if payload.curriculum_code:
         from app.services.roadmap_planner import plan_route
@@ -449,6 +526,10 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
     # Custom logic to support the "5 nodes + I/We/You Do" requirement
     subject_uid = payload.subject_uid
     progress = payload.current_progress or {}
+    cache_key = _roadmap_cache_key(payload, progress)
+    cached = _roadmap_cache_get(cache_key)
+    if cached:
+        return cached
 
     # 1. Fetch Candidate Topics (limit 20 to give LLM choices)
     topics = []
@@ -523,28 +604,23 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
     for r in rows:
         uid = r["uid"]
         score = progress.get(uid, 0.0)
+        prereqs = [str(x)[:60] for x in (r.get("prereqs", []) or [])[:3]]
+        skills = [str(x)[:60] for x in (r.get("skills", []) or [])[:3]]
         candidates_info.append({
             "uid": uid,
-            "title": r["title"],
-            "description": r.get("description") or "",
+            "title": (r["title"] or "")[:80],
+            "description": (r.get("description") or "")[:120],
             "current_score": score,
             "relationship": r.get("rel_type", "unknown"),
             "distance": r.get("dist", 100),
-            "prerequisites": r.get("prereqs", []),
-            "skills": r.get("skills", [])
+            "prerequisites": prereqs,
+            "skills": skills,
         })
 
     personalization_mode = "llm"
     used_llm = False
     if settings.openai_api_key and candidates_info:
         try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(
-                api_key=settings.openai_api_key.get_secret_value(),
-                max_retries=0,
-                timeout=20.0,
-            )
-            
             prompt = (
                 "You are an adaptive learning AI. Select the best 5-8 topics for a student roadmap from the list below.\n"
                 f"The student is currently focusing on topic: '{focus_title}' (UID: {focus_uid}).\n"
@@ -557,19 +633,21 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
                 "6. GENERATE a short, engaging description (in Russian) for any topic that has an empty description.\n"
                 "Return a valid JSON object with a key 'selected_topics' containing a list of objects: {'uid': '...', 'description': '...'}.\n"
                 "The list must be ordered by priority (highest priority first).\n\n"
-                f"Candidates: {json.dumps(candidates_info, ensure_ascii=False)}"
+                f"Candidates: {json.dumps(candidates_info[:12], ensure_ascii=False)}"
             )
             
-            completion = await client.chat.completions.create(
-                model="gpt-4o-mini",
+            completion = await openai_chat_async(
                 messages=[
                     {"role": "system", "content": "You are a helpful tutor assistant. Output valid JSON only."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ],
-                response_format={"type": "json_object"}
+                temperature=0.2,
+                model="gpt-4o-mini",
+                feature="engine_roadmap_select",
+                max_tokens=650,
+                response_format={"type": "json_object"},
             )
-            
-            content = completion.choices[0].message.content
+            content = completion.get("content") if completion.get("ok") else None
             if content:
                 data = json.loads(content)
                 selected_items = data.get("selected_topics", [])
@@ -644,7 +722,16 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
         ))
         count += 1
 
-    return {"nodes": topics, "personalization_mode": personalization_mode}
+    result = {"nodes": topics, "personalization_mode": personalization_mode}
+    cache_ready = {
+        "nodes": [
+            n.model_dump() if hasattr(n, "model_dump") else n
+            for n in topics
+        ],
+        "personalization_mode": personalization_mode,
+    }
+    _roadmap_cache_set(cache_key, cache_ready)
+    return result
 
 # --- Knowledge / Topics ---
 
@@ -1458,113 +1545,73 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     # 3. Prompt
     visual_instruction = ""
     if is_visual:
-        visual_instruction = """
-    Visualization: set "is_visual":true and include "visualization":{"type":"...","coordinates":[...]}.
-    Types:
-    - "graph": for function plots, use this structure instead of coordinates:
-        {"type":"graph","functions":[{"formula":"PYTHON_EXPR","label":"y = display_form","color":"blue"}]}
-        formula MUST be a valid Python expression using variable x, e.g.: "x**2 - 3", "2*x + 1", "sin(x)".
-        Allowed: +, -, *, **, /, (), sin, cos, tan, sqrt, abs, log, exp, pi, e.
-        DO NOT provide coordinates — the server computes all points automatically from the formula.
-        MULTIPLE functions: add more objects to the functions array.
-    - "geometric_shape": polygons in [0..7]x[0..7]. Each: {"type":"polygon","points":[...],"label":"ABC","vertex_labels":[...]}. Max 3 shapes.
-    - "table": {"type":"table","headers":[...],"rows":[[...],...]} — no coordinates field.
-    - "diagram": number lines, pie/bar charts.
-    CRITICAL for geometric_shape: All x,y MUST be integers in [-7,7]. Problem MUST have a unique correct answer. Verify before writing.
-    """
+        visual_instruction = (
+            'If visual: set "is_visual": true and include visualization.\n'
+            'Types: graph/functions, geometric_shape/polygons, table, diagram.\n'
+            "For graph use formulas only (no coordinates), valid python expr with x.\n"
+            "For geometric_shape coordinates x,y must be integers in [-7,7], max 3 objects."
+        )
 
     avoid_context = ""
     if previous_prompts:
-        recent = previous_prompts[-3:]
-        avoid_context = f"\nAvoid repeating topics similar to: {'; '.join(recent)}\n"
+        recent = [p[:40] for p in previous_prompts[-2:]]
+        avoid_context = f"\nAvoid repeating: {'; '.join(recent)}\n"
 
     # Define JSON structure based on type to avoid duplication
     if q_type == "single_choice":
-        json_structure = f"""
-    {{
-        "prompt": "Question text",
-        "options": [
-            {{"option_uid": "opt_1", "text": "Option 1", "is_correct": true}},
-            {{"option_uid": "opt_2", "text": "Option 2", "is_correct": false}}
-        ],
-        "explanation": "Brief explanation",
-        "is_visual": {"true" if is_visual else "false"},
-        "visualization": {{ ... }},
-        "math_consistency_proof": "Brief explanation of coordinate correctness"
-    }}
-    """
+        json_structure = (
+            '{"prompt":"...","options":[{"option_uid":"opt_1","text":"...","is_correct":true},'
+            '{"option_uid":"opt_2","text":"...","is_correct":false}],'
+            f'"explanation":"...","is_visual":{"true" if is_visual else "false"},'
+            '"visualization":{},"math_consistency_proof":"..."}'
+        )
     else:
         # numeric, free_text, boolean (treated as free/numeric for simplicity or needing value)
-        json_structure = f"""
-    {{
-        "prompt": "Question text",
-        "correct_value": "Answer value",
-        "explanation": "Brief explanation",
-        "is_visual": {"true" if is_visual else "false"},
-        "visualization": {{ ... }},
-        "math_consistency_proof": "Brief explanation of coordinate correctness"
-    }}
-    """
+        json_structure = (
+            '{"prompt":"...","correct_value":"...","explanation":"...",'
+            f'"is_visual":{"true" if is_visual else "false"},"visualization":{{}},'
+            '"math_consistency_proof":"..."}'
+        )
 
     # Enhanced Context for LLM
-    desc = (topic_context['description'] or "")[:120]
+    desc = (topic_context['description'] or "")[:90]
     description_text = f"Topic Description: {desc}" if desc else ""
-    prereqs_text = f"Prerequisites: {', '.join(topic_context['prereqs'][:5])}" if topic_context['prereqs'] else ""
+    prereqs_text = f"Prerequisites: {', '.join(topic_context['prereqs'][:3])}" if topic_context['prereqs'] else ""
     subject_text = f"Subject/Domain: {topic_context['subject']}" if topic_context['subject'] else ""
 
     skills_text = ""
     if topic_context['skills']:
-        skill_lines = [f"- {s['title']}: {(s.get('definition') or '')[:80]}" for s in topic_context['skills'][:5]]
+        skill_lines = [f"- {s['title']}: {(s.get('definition') or '')[:50]}" for s in topic_context['skills'][:3]]
         skills_text = "Skills:\n" + "\n".join(skill_lines)
     if topic_context.get('methods'):
-        methods_joined = ", ".join(topic_context['methods'][:5])
+        methods_joined = ", ".join(topic_context['methods'][:3])
         skills_text += f"\nMethods: {methods_joined}"
 
     prompt_text = f"""
-    Generate a unique assessment question for the topic "{topic_title}" (UID: {topic_uid}).
+    Generate ONE unique assessment question for topic "{topic_title}" (UID: {topic_uid}).
     {subject_text}
     {description_text}
     {prereqs_text}
     {skills_text}
 
-    Context: Russian school adaptive learning platform (ОГЭ/ЕГЭ preparation).
-    Target Audience: Russian 9th–11th grade students.
-    Language: Russian. ALL text MUST be in Russian.
-
-    EXAM STANDARD: Questions MUST match the style and difficulty of official Russian ОГЭ/ЕГЭ exam tasks from sdamgia.ru / fipi.ru.
-    - ОГЭ tasks 1–14: arithmetic, algebra, geometry, statistics/probability, graphs of functions.
-    - Each question must be self-contained, solvable with pen and paper, and have a single unambiguous correct answer.
-    - The problem conditions must NOT contradict each other (triangle inequality, discriminant ≥ 0, etc.).
-
-    Difficulty Level: {difficulty}/10 ({diff_desc}).
-    - Level 1-4: Direct formula application, 1-step arithmetic (ОГЭ tasks 1–8 style).
-    - Level 5-7: 2-step reasoning, word problems, basic geometry (ОГЭ tasks 9–14 style).
-    - Level 8-10: Multi-step proofs, complex geometry, systems of equations (ЕГЭ profile style).
+    Context: Russian school platform (ОГЭ/ЕГЭ style), grades 9-11.
+    Language: Russian only.
+    Difficulty: {difficulty}/10 ({diff_desc}).
+    Task must be self-contained, solvable on paper, and have one unambiguous answer.
 
     Question Type: {q_type}
     Is Visual Task: {is_visual}
     {visual_instruction}
     {avoid_context}
 
-    SOLVABILITY CHECK (MANDATORY before writing the question):
-    1. Write the problem to yourself mentally.
-    2. Solve it yourself step by step.
-    3. Verify: does your correct_answer satisfy ALL conditions in the problem?
-    4. Only then write the JSON. If you cannot solve it, simplify the numbers.
-
-    IMPORTANT: If "Is Visual Task" is True, you MUST provide a valid "visualization" object.
-    IMPORTANT: If "Is Visual Task" is False, do NOT refer to figures/graphs/drawings in the question text.
-
-    Requirements:
-    - Output valid JSON only. No markdown, no text outside JSON.
-    - "single_choice": Exactly 4 options, exactly 1 correct. Distractors must be plausible but wrong.
-    - "numeric": The answer is a single number (integer or simple decimal). State units if needed.
-    - "free_text": Short answer (1–3 words or a number with explanation).
-    - GRAMMAR: Match Russian gender/number correctly for all nouns.
-    - MULTIPLE ROOTS: If quadratic has two roots x1, x2, the correct option for single_choice MUST contain both: "x₁=2, x₂=3". Never list only one root.
-    - COORDINATES SYNC: Every coordinate mentioned in text (e.g. "точка A(2;3)") MUST appear in visualization.
-    - COORDINATE RANGE: All visualization x, y MUST be integers in [-7, 7].
-    - GRAPH QUALITY: Minimum 9 points for curves. Parabola MUST include vertex point.
+    Rules:
+    - Return valid JSON only, no markdown.
+    - single_choice: exactly 4 options, exactly 1 correct.
+    - numeric: one numeric answer.
+    - free_text: short answer.
+    - If visual=false, do not reference figures.
+    - Coordinates mentioned in text must match visualization.
+    - For quadratic with two roots, include both roots in the correct answer.
 
     JSON Structure:
     {json_structure}
@@ -1577,7 +1624,14 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     content = ""
     for attempt in range(2):
         try:
-            res = await openai_chat_async(messages, temperature=0.9)
+            res = await openai_chat_async(
+                messages,
+                temperature=0.35,
+                model="gpt-4o-mini",
+                feature="assessment_question_generate",
+                max_tokens=520,
+                response_format={"type": "json_object"},
+            )
             if not res.get("ok"):
                 err = res.get("error") or "LLM generation failed"
                 if _is_rate_limited_llm_error(err):
@@ -1666,10 +1720,9 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             break
 
         except Exception as e:
-            if attempt == 1 or _is_rate_limited_llm_error(e):
+            if attempt >= 1 or _is_rate_limited_llm_error(e):
                 raise e
             logger.warning("llm_parsing_error", error=str(e), action="retrying")
-            pass
 
     # Process generated data after retry loop
     try:
@@ -1919,7 +1972,8 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
     response_model=StandardResponse,
     responses={400: {"model": ApiError}, 404: {"model": ApiError}},
 )
-async def start(payload: StartRequest) -> Dict:
+async def start(payload: StartRequest, request: Request) -> Dict:
+    _enforce_rate_limit(request, route_key="assessment_start", limit=25, window_sec=60)
     try:
         uc = payload.user_context or UserContext()
         resolved = _resolve_level(uc)
@@ -2371,7 +2425,7 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
     async def _select_non_duplicate(min_d: int, max_d: int, blocked_uids: Set[str]) -> Optional[Dict]:
         previous_prompts = sess.get("asked_prompts", [])
         local_blocked = set(blocked_uids)
-        for _ in range(3):
+        for _ in range(1):
             candidate = await _select_question(
                 topic_uid,
                 min_d,
@@ -2400,13 +2454,7 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
             q = None
 
     if not q:
-        # Last resort: widen difficulty, but still exclude already asked question UIDs.
-        try:
-            q = await _select_non_duplicate(max(1, d - 1), min(10, d + 1), asked_uids)
-        except Exception:
-            q = None
-        if not q:
-            return None
+        return None
 
     # Ensure subject_uid is populated in the question response
     if q:
@@ -2436,7 +2484,8 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
     "/assessment/next",
     responses={400: {"model": ApiError}},
 )
-async def next_question(payload: NextRequest):
+async def next_question(payload: NextRequest, request: Request):
+    _enforce_rate_limit(request, route_key="assessment_next", limit=120, window_sec=60)
     try:
         sid = payload.assessment_session_id
         sess = _get_session(sid)
@@ -2549,38 +2598,24 @@ async def next_question(payload: NextRequest):
                         # Sort by order asked if possible, or just iterate
                         asked_uids = sess.get("asked", [])
                         
-                        for i, uid in enumerate(asked_uids):
+                        for i, uid in enumerate(asked_uids[:8]):
                              if uid in q_details:
                                  qd = q_details[uid]
                                  computed_score = float(qd.get('score') or 0.0)
                                  result_label = "ВЕРНО ✓" if computed_score >= 0.5 else "НЕВЕРНО ✗"
-                                 history_text += f"Q{i+1}: {qd.get('prompt')}\\n"
-                                 history_text += f"User Answer: {qd.get('user_answer')}\\n"
-                                 history_text += f"Correct Data: {qd.get('correct_data')}\\n"
+                                 history_text += f"Q{i+1}: {str(qd.get('prompt') or '')[:120]}\\n"
+                                 history_text += f"User Answer: {str(qd.get('user_answer') or '')[:100]}\\n"
+                                 history_text += f"Correct Data: {str(qd.get('correct_data') or '')[:100]}\\n"
                                  history_text += f"Score: {computed_score} ({result_label})\\n\\n"
                         
                         sys_prompt = (
-                            "You are an expert tutor. Analyze the student's session history detailedly.\\n"
-                            "LANGUAGE: All output text (feedback, comments, recommendations) MUST be in RUSSIAN.\\n"
-                            "1. The 'Score' field already reflects the VERIFIED result (ВЕРНО/НЕВЕРНО). RESPECT it as ground truth for correct/incorrect classification.\\n"
-                            "2. BE LENIENT with formatting errors (e.g. 0.2 vs 2/10, or missing units). For borderline cases, give PARTIAL credit (0.5) but do NOT contradict a Score=1.0 (ВЕРНО) verdict.\\n"
-                            "3. Calculate the precise knowledge level (0-100%) based on the computed scores. Focus on CONCEPTUAL understanding.\\n"
-                            "4. Provide a specific, constructive feedback for EACH question. If Score shows ВЕРНО, acknowledge the correct answer. If НЕВЕРНО, explain what was wrong.\\n"
-                            "5. Identify specific knowledge gaps (e.g. 'confuses radius and diameter').\\n"
-                            "6. Provide a tailored recommendation (NOT just 'next topic', but specific actions).\\n"
-                            "7. Identify specific STRENGTHS (e.g. 'quick calculation', 'good conceptual grasp', 'pattern recognition').\\n"
-                            "Output JSON format:\\n"
-                            "{\\n"
-                            "  \"questions_analytics\": [\\n"
-                            "    {\"question_uid\": \"...\", \"feedback\": \"...\"}\\n"
-                            "  ],\\n"
-                            "  \"overall_comment\": \"...\",\\n"
-                            "  \"knowledge_level_percent\": 85,\\n"
-                            "  \"specific_gaps\": [\"...\", \"...\"],\\n"
-                            "  \"recommendation\": \"...\",\\n"
-                            "  \"strength\": \"...\"\\n"
-                            "}\\n"
-                            "Return ONLY JSON."
+                            "Ты тьютор-аналитик. Отвечай ТОЛЬКО на русском и только JSON.\\n"
+                            "Используй Score как ground truth (ВЕРНО/НЕВЕРНО).\\n"
+                            "Дай краткий feedback по каждому вопросу, общий комментарий, gaps, recommendation, strengths.\\n"
+                            "Формат JSON: "
+                            '{"questions_analytics":[{"question_uid":"...","feedback":"..."}],'
+                            '"overall_comment":"...","knowledge_level_percent":85,'
+                            '"specific_gaps":["..."],"recommendation":"...","strength":"..."}'
                         )
                         
                         # Call LLM
@@ -2590,7 +2625,12 @@ async def next_question(payload: NextRequest):
                              {"role": "user", "content": f"Topic: {sess.get('topic_uid')}\\n\\nHistory:\\n{history_text}"}
                         ]
                         
-                        llm_resp = await openai_chat_async(messages, temperature=0.5)
+                        llm_resp = await openai_chat_async(
+                            messages,
+                            temperature=0.2,
+                            feature="assessment_final_analytics",
+                            max_tokens=500,
+                        )
                         
                         if not llm_resp.get("ok"):
                              raise Exception(f"LLM Error: {llm_resp.get('error')}")

@@ -1,14 +1,39 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Literal
-from app.config.settings import settings
 from app.services.graph.neo4j_repo import relation_context, neighbors
 from app.services.roadmap_planner import plan_route
 from app.api.analytics import stats as analytics_stats
 from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples
 from app.api.common import ApiError
+from app.events.publisher import get_redis
+from app.services.kb.builder import openai_chat_async
 
 router = APIRouter(prefix="/v1/assistant", tags=["ИИ ассистент"])
+
+
+def _request_scope(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _enforce_rate_limit(request: Request, *, route_key: str, limit: int, window_sec: int = 60) -> None:
+    try:
+        r = get_redis()
+        key = f"rl:{route_key}:{_request_scope(request)}"
+        current = int(r.incr(key))
+        if current == 1:
+            r.expire(key, window_sec)
+        if current > limit:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded, please try again later.")
+    except HTTPException:
+        raise
+    except Exception:
+        return
 
 class ToolInfo(BaseModel):
     name: str
@@ -66,7 +91,8 @@ class AssistantChatInput(BaseModel):
         503: {"model": ApiError, "description": "Сервис LLM недоступен"},
     }
 )
-async def chat(payload: AssistantChatInput) -> Dict:
+async def chat(payload: AssistantChatInput, request: Request) -> Dict:
+    _enforce_rate_limit(request, route_key="assistant_chat", limit=35, window_sec=60)
     """
     Принимает:
       - action: одно из [explain_relation, viewport, roadmap, analytics, questions] или None для свободного ответа
@@ -86,26 +112,23 @@ async def chat(payload: AssistantChatInput) -> Dict:
         if not payload.from_uid or not payload.to_uid:
             raise HTTPException(status_code=400, detail="from_uid/to_uid required")
         ctx = relation_context(payload.from_uid, payload.to_uid)
-        try:
-            from openai import AsyncOpenAI
-            oai = AsyncOpenAI(
-                api_key=settings.openai_api_key.get_secret_value(),
-                max_retries=0,
-                timeout=20.0,
-            )
-            messages = [
-                {"role": "system", "content": "Ты эксперт по графу. Объясни, почему существует связь, используя метаданные."},
-                {
-                    "role": "user",
-                    "content": f"Вопрос: {payload.message}\nОт: {ctx.get('from_title','')} ({payload.from_uid})\nК: {ctx.get('to_title','')} ({payload.to_uid})\nСвязь: {ctx.get('rel','')}\nСвойства: {ctx.get('props',{})}",
-                },
-            ]
-            resp = await oai.chat.completions.create(model="gpt-4o-mini", messages=messages)
-            answer = resp.choices[0].message.content if resp.choices else ""
-            usage = resp.usage or None
-            return {"answer": answer, "usage": (usage.model_dump() if hasattr(usage, "model_dump") else None), "context": ctx}
-        except Exception:
+        messages = [
+            {"role": "system", "content": "Ты эксперт по графу. Объясни, почему существует связь, используя метаданные."},
+            {
+                "role": "user",
+                "content": f"Вопрос: {payload.message}\nОт: {ctx.get('from_title','')} ({payload.from_uid})\nК: {ctx.get('to_title','')} ({payload.to_uid})\nСвязь: {ctx.get('rel','')}\nСвойства: {ctx.get('props',{})}",
+            },
+        ]
+        res = await openai_chat_async(
+            messages,
+            temperature=0.2,
+            model="gpt-4o-mini",
+            feature="assistant_explain_relation",
+            max_tokens=350,
+        )
+        if not res.get("ok"):
             raise HTTPException(status_code=502, detail="LLM request failed")
+        return {"answer": res.get("content", ""), "usage": res.get("usage"), "context": ctx}
 
     if payload.action == "viewport":
         if not payload.center_uid:
@@ -132,20 +155,17 @@ async def chat(payload: AssistantChatInput) -> Dict:
         )
         return {"questions": examples}
 
-    try:
-        from openai import AsyncOpenAI
-        oai = AsyncOpenAI(
-            api_key=settings.openai_api_key.get_secret_value(),
-            max_retries=0,
-            timeout=20.0,
-        )
-        messages = [
-            {"role": "system", "content": "Ты ассистент платформы KnowledgeBase: помогаешь с графом, планом обучения и вопросами."},
-            {"role": "user", "content": payload.message},
-        ]
-        resp = await oai.chat.completions.create(model="gpt-4o-mini", messages=messages)
-        answer = resp.choices[0].message.content if resp.choices else ""
-        usage = resp.usage or None
-        return {"answer": answer, "usage": (usage.model_dump() if hasattr(usage, "model_dump") else None)}
-    except Exception:
+    messages = [
+        {"role": "system", "content": "Ты ассистент платформы KnowledgeBase: помогаешь с графом, планом обучения и вопросами."},
+        {"role": "user", "content": payload.message},
+    ]
+    res = await openai_chat_async(
+        messages,
+        temperature=0.2,
+        model="gpt-4o-mini",
+        feature="assistant_free_chat",
+        max_tokens=350,
+    )
+    if not res.get("ok"):
         raise HTTPException(status_code=502, detail="LLM request failed")
+    return {"answer": res.get("content", ""), "usage": res.get("usage")}

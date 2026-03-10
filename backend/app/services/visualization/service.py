@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, Any, List, Optional
 from app.services.visualization.geometry import GeometryEngine
 from app.services.graph.neo4j_repo import get_driver
-from app.services.kb.builder import openai_chat_async
+from app.services.kb.gigachat import gigachat_chat_async
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -25,14 +25,14 @@ class VisualizationService:
         prompt = VisualizationService._build_prompt(topic_uid, prereqs, difficulty, user_context)
         
         # Retry loop for consistency
-        max_retries = 2
+        max_retries = 1
         last_error = None
         
         for attempt in range(max_retries):
-            response = await openai_chat_async([
+            response = await gigachat_chat_async([
                 {"role": "system", "content": "You are a math question generator specializing in visual geometry problems."},
                 {"role": "user", "content": prompt}
-            ], temperature=0.7)
+            ], temperature=0.35, max_tokens=520)
             
             if not response.get('ok'):
                 error_msg = response.get('error', 'Unknown error')
@@ -119,31 +119,18 @@ class VisualizationService:
     def _build_prompt(topic_uid: str, prereqs: List[Dict], difficulty: int, user_context: Dict) -> str:
         # Construct prompt
         return f"""
-        Generate a visual math question for Topic: {topic_uid}.
-        Prerequisites: {json.dumps(prereqs)}
-        Target Difficulty: {difficulty}/10.
-        
-        Requirements:
-        1. Output JSON format strictly.
-        2. Visualization must be on 10x10 canvas.
-        3. Center main objects at (5,5).
-        4. Max 3 objects.
-        5. "visualization_matches_text" must be true.
-        6. Question text must match coordinates mathematically.
-        
-        Format:
+        Generate one visual math question (JSON only).
+        Topic: {topic_uid}
+        Prerequisites: {json.dumps(prereqs[:3], ensure_ascii=False)}
+        Difficulty: {difficulty}/10
+        Rules: max 3 objects, valid coordinates, text and visualization must match.
+        JSON:
         {{
-            "question_text": "...",
-            "options": [...],
-            "correct_answer": "...",
-            "visualization": {{
-                "type": "geometric_shape",
-                "coordinates": [
-                    {{ "type": "polygon", "points": [{{ "x": ..., "y": ... }}], ... }}
-                ],
-                "indicators": [...]
-            }},
-            "visualization_matches_text": true
+          "question_text":"...",
+          "options":[...],
+          "correct_answer":"...",
+          "visualization":{{"type":"geometric_shape","coordinates":[...],"indicators":[...]}},
+          "visualization_matches_text": true
         }}
         """
 

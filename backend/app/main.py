@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +29,7 @@ except Exception:
     graphql_router = None
 from app.api.validation import router as validation_router
 from app.api.auth import router as auth_router
+from app.api.deps import require_engine_access
 from app.services.auth.users_repo import ensure_bootstrap_admin
 from app.core.migrations import check_and_gatekeep
 try:
@@ -151,7 +152,7 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/redoc", include_in_schema=False)
-async def redoc_html():
+async def redoc_html(_auth=Depends(require_engine_access)):
     return get_redoc_html(openapi_url=app.openapi_url, title=app.title + " - ReDoc", redoc_js_url="/static/redoc/redoc.standalone.js")
 
 
@@ -238,11 +239,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(status_code=422, content=ae.model_dump())
 
 @app.get("/health", tags=["Система"], summary="Проверка состояния", description="Возвращает статус доступности ключевых зависимостей.")
-async def health():
+async def health(_auth=Depends(require_engine_access)):
     return {"openai": bool(settings.openai_api_key.get_secret_value()), "neo4j": bool(settings.neo4j_uri)}
 
 @app.get("/metrics", tags=["Система"], summary="Метрики Prometheus", description="Экспорт метрик в формате, совместимом с Prometheus.")
-async def metrics():
+async def metrics(_auth=Depends(require_engine_access)):
     from prometheus_client import generate_latest
     return generate_latest()
 
@@ -256,20 +257,27 @@ if origins:
         allow_headers=["*"],
     )
 
-app.include_router(engine_router, prefix="/v1/engine", tags=["Engine"])
+app.include_router(
+    engine_router,
+    prefix="/v1/engine",
+    tags=["Engine"],
+    dependencies=[Depends(require_engine_access)],
+)
 # app.include_router(roadmap_router, prefix="/v1/roadmap", tags=["Roadmap"])
-app.include_router(analytics_router)
-app.include_router(ws_router)
-app.include_router(admin_router)
-app.include_router(admin_curriculum_router)
-app.include_router(admin_graph_router)
-app.include_router(maintenance_router)
-app.include_router(proposals_router)
-app.include_router(ingestion_router)
+app.include_router(analytics_router, dependencies=[Depends(require_engine_access)])
+app.include_router(ws_router, dependencies=[Depends(require_engine_access)])
+app.include_router(admin_router, dependencies=[Depends(require_engine_access)])
+app.include_router(admin_curriculum_router, dependencies=[Depends(require_engine_access)])
+app.include_router(admin_graph_router, dependencies=[Depends(require_engine_access)])
+app.include_router(maintenance_router, dependencies=[Depends(require_engine_access)])
+app.include_router(proposals_router, dependencies=[Depends(require_engine_access)])
+app.include_router(ingestion_router, dependencies=[Depends(require_engine_access)])
 
-app.include_router(assistant_router)
+app.include_router(assistant_router, dependencies=[Depends(require_engine_access)])
 
 if graphql_router:
-    app.include_router(graphql_router, prefix="/v1/graphql")
-app.include_router(auth_router)
-app.include_router(validation_router)
+    app.include_router(
+        graphql_router, prefix="/v1/graphql", dependencies=[Depends(require_engine_access)]
+    )
+app.include_router(auth_router, dependencies=[Depends(require_engine_access)])
+app.include_router(validation_router, dependencies=[Depends(require_engine_access)])

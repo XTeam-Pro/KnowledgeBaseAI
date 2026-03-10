@@ -13,37 +13,25 @@ class AcademicIngestionStrategy(IngestionStrategy):
         
         # 1. Parse TOC via LLM
         prompt = f"""
-        Context: {domain_context}.
-        You are an expert curriculum designer.
-        Parse the following Table of Contents (TOC) into a strict JSON structure.
-        
-        Input text:
-        {text[:4000]}
-        
-        Output JSON format:
+        Parse TOC into JSON hierarchy.
+        Context: {domain_context}
+        Input: {text[:2500]}
+        Return JSON only:
         {{
-            "subject": "Subject Title",
-            "sections": [
-                {{
-                    "title": "Section Title",
-                    "subsections": [
-                        {{
-                            "title": "Subsection Title",
-                            "topics": [
-                                {{ "title": "Topic Title" }}
-                            ]
-                        }}
-                    ]
-                }}
-            ]
+          "subject":"...",
+          "sections":[{{"title":"...","subsections":[{{"title":"...","topics":[{{"title":"..."}}]}}]}}]
         }}
-        
-        If the hierarchy is flat, infer logical grouping.
-        Return ONLY valid JSON.
+        If flat, infer minimal logical grouping.
         """
         
         messages = [{"role": "user", "content": prompt}]
-        res = await openai_chat_async(messages, temperature=0.1)
+        res = await openai_chat_async(
+            messages,
+            temperature=0.1,
+            feature="ingestion_academic_parse",
+            max_tokens=700,
+            response_format={"type": "json_object"},
+        )
         if not res.get("ok"):
             raise ValueError(f"LLM Error: {res.get('error')}")
             

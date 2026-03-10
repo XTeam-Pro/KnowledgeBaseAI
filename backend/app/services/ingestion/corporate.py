@@ -13,40 +13,24 @@ class CorporateIngestionStrategy(IngestionStrategy):
         
         # 1. Parse Text via LLM
         prompt = f"""
-        Context: {domain_context}.
-        You are a knowledge engineer analyzing a corporate manual/document.
-        Analyze the text and extract a structured hierarchy.
-        Also identify key "Skills" (actions/competencies) required for each Topic (instruction).
-        
-        Input text:
-        {text[:6000]}
-        
-        Output JSON format:
+        Parse corporate document into compact JSON hierarchy with skills.
+        Context: {domain_context}
+        Input: {text[:3000]}
+        Return JSON only:
         {{
-            "subject": "Document Title",
-            "sections": [
-                {{
-                    "title": "Chapter/Section Title",
-                    "subsections": [
-                        {{
-                            "title": "Subchapter Title",
-                            "topics": [
-                                {{ 
-                                    "title": "Topic/Instruction Title",
-                                    "skills": ["Skill 1", "Skill 2"]
-                                }}
-                            ]
-                        }}
-                    ]
-                }}
-            ]
+          "subject":"...",
+          "sections":[{{"title":"...","subsections":[{{"title":"...","topics":[{{"title":"...","skills":["..."]}}]}}]}}]
         }}
-        
-        Return ONLY valid JSON.
         """
         
         messages = [{"role": "user", "content": prompt}]
-        res = await openai_chat_async(messages, temperature=0.1)
+        res = await openai_chat_async(
+            messages,
+            temperature=0.1,
+            feature="ingestion_corporate_parse",
+            max_tokens=800,
+            response_format={"type": "json_object"},
+        )
         if not res.get("ok"):
             raise ValueError(f"LLM Error: {res.get('error')}")
             
