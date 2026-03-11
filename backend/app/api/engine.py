@@ -149,12 +149,15 @@ async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
             OPTIONAL MATCH (sk:Skill)-[:HAS_METHOD]->(m)
             OPTIONAL MATCH (t:Topic)-[:REQUIRES_SKILL]->(sk)
             OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
-                WHERE ($user_class IS NULL
-                       OR (
-                           (ex.user_class_min IS NULL OR ex.user_class_min <= $user_class)
-                           AND
-                           (ex.user_class_max IS NULL OR ex.user_class_max >= $user_class)
-                       ))
+                WHERE $user_class IS NULL
+                      OR (ex.user_class_min IS NOT NULL
+                          AND ex.user_class_min <= $user_class
+                          AND ex.user_class_max >= $user_class)
+                      OR (ex.user_class_min IS NULL
+                          AND NOT EXISTS {
+                              MATCH (m)-[:HAS_EXAMPLE]->(ge:Example)
+                              WHERE ge.user_class_min IS NOT NULL
+                          })
             RETURN
                 m.uid            AS uid,
                 m.title          AS title,
@@ -217,12 +220,20 @@ async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) ->
     try:
         cypher = """
             MATCH (t:Topic {uid: $uid})-[:REQUIRES_SKILL]->(sk:Skill)-[:HAS_METHOD]->(m:Method)
-            WHERE ($user_class IS NULL
-                   OR (
-                       (m.user_class_min IS NULL OR m.user_class_min <= $user_class)
-                       AND
-                       (m.user_class_max IS NULL OR m.user_class_max >= $user_class)
-                   ))
+            WITH t, sk, m,
+                 CASE WHEN $user_class IS NULL THEN false
+                      ELSE EXISTS {
+                          MATCH (t)-[:REQUIRES_SKILL]->(:Skill)-[:HAS_METHOD]->(gm:Method)
+                          WHERE gm.user_class_min IS NOT NULL
+                      }
+                 END AS has_graded
+            WHERE $user_class IS NULL
+                  OR (has_graded AND m.user_class_min IS NOT NULL
+                      AND m.user_class_min <= $user_class
+                      AND m.user_class_max >= $user_class)
+                  OR (NOT has_graded
+                      AND (m.user_class_min IS NULL OR m.user_class_min <= $user_class)
+                      AND (m.user_class_max IS NULL OR m.user_class_max >= $user_class))
             OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
             WITH t, sk, m, count(ex) AS example_count
             RETURN
@@ -236,7 +247,9 @@ async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) ->
                 t.uid          AS topic_uid,
                 t.title        AS topic_title,
                 example_count
-            ORDER BY m.user_class_min ASC NULLS FIRST, m.title ASC
+            ORDER BY
+                m.user_class_min ASC,
+                m.title ASC
             """
         rows = repo.read(cypher, {"uid": topic_uid, "user_class": user_class})
     finally:
