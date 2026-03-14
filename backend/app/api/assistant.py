@@ -7,6 +7,7 @@ from app.api.analytics import stats as analytics_stats
 from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples
 from app.api.common import ApiError
 from app.events.publisher import get_redis
+from app.events.telemetry import track_event
 from app.services.kb.builder import openai_chat_async
 
 router = APIRouter(prefix="/v1/assistant", tags=["ИИ ассистент"])
@@ -168,4 +169,8 @@ async def chat(payload: AssistantChatInput, request: Request) -> Dict:
     )
     if not res.get("ok"):
         raise HTTPException(status_code=502, detail="LLM request failed")
+    try:
+        track_event("kb_assistant_chat", {"action": payload.action or "free_chat"})
+    except Exception:
+        pass
     return {"answer": res.get("content", ""), "usage": res.get("usage")}

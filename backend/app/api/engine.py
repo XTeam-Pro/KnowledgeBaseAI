@@ -24,6 +24,7 @@ from starlette.responses import StreamingResponse
 from app.services.graph.neo4j_repo import Neo4jRepo
 from app.services.questions import select_examples_for_topics
 from app.events.publisher import get_redis
+from app.events.telemetry import track_event
 from app.services.kb.builder import openai_chat_async
 from app.services.visualization.geometry import GeometryEngine
 from app.services.visualization.graph_engine import GraphEngine
@@ -744,6 +745,10 @@ async def roadmap(payload: RoadmapRequest, request: Request) -> Dict:
         "personalization_mode": personalization_mode,
     }
     _roadmap_cache_set(cache_key, cache_ready)
+    try:
+        track_event("kb_roadmap_generated", {"subject_uid": subject_uid, "nodes_count": len(topics)})
+    except Exception:
+        pass
     return result
 
 # --- Knowledge / Topics ---
@@ -1167,6 +1172,10 @@ class MasteryUpdateRequest(BaseModel):
 @router.post("/mastery/update", response_model=StandardResponse)
 async def mastery_update(req: MasteryUpdateRequest):
     res = update_mastery(req.prior_mastery, req.score, req.confidence)
+    try:
+        track_event("kb_mastery_updated", {"entity_uid": req.entity_uid, "new_mastery": res.get("posterior_mastery", 0)})
+    except Exception:
+        pass
     return {"items": [{"uid": req.entity_uid, "kind": req.kind, **res}], "meta": {}}
 
 
@@ -2097,7 +2106,11 @@ async def start(payload: StartRequest, request: Request) -> Dict:
         }
         if not _save_session(sid, sess_data):
             raise HTTPException(status_code=500, detail="Failed to initialize session storage")
-            
+
+        try:
+            track_event("kb_assessment_started", {"session_id": sid, "subject_uid": payload.subject_uid, "topic_uid": payload.topic_uid})
+        except Exception:
+            pass
         return {"items": [first_q], "meta": {"assessment_session_id": sid}}
     except HTTPException:
         raise

@@ -11,6 +11,7 @@ from app.db.pg import get_proposal, set_proposal_status, list_proposals
 from app.services.diff import build_diff
 from app.services.impact import impact_subgraph_for_proposal
 from app.api.common import StandardResponse
+from app.events.telemetry import track_event
 
 router = APIRouter(prefix="/v1/proposals", tags=["Управление контентом"], dependencies=[Security(HTTPBearer())])
 
@@ -82,6 +83,10 @@ async def create_proposal(payload: CreateProposalInput, tenant_id: str = Depends
                 ),
             )
         conn.close()
+        try:
+            track_event("kb_proposal_created", {"proposal_id": p.proposal_id, "operations_count": len(ops)})
+        except Exception:
+            pass
         return {"items": [{"proposal_id": p.proposal_id, "proposal_checksum": p.proposal_checksum, "status": ProposalStatus.DRAFT.value}], "meta": {}}
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -111,6 +116,10 @@ async def commit(proposal_id: str, tenant_id: str = Depends(require_tenant), x_t
         status = res.get("status") or "FAILED"
         code = 409 if status == "CONFLICT" else 400
         raise HTTPException(status_code=code, detail=res)
+    try:
+        track_event("kb_proposal_committed", {"proposal_id": proposal_id})
+    except Exception:
+        pass
     return {"items": [res], "meta": {}}
 
 @router.get(
@@ -173,6 +182,10 @@ async def approve(proposal_id: str, tenant_id: str = Depends(require_tenant), x_
         status = res.get("status") or "FAILED"
         code = 409 if status == "CONFLICT" else 400
         raise HTTPException(status_code=code, detail=res)
+    try:
+        track_event("kb_proposal_approved", {"proposal_id": proposal_id})
+    except Exception:
+        pass
     return {"items": [res], "meta": {}}
 
 @router.post(
@@ -193,6 +206,10 @@ async def reject(proposal_id: str, tenant_id: str = Depends(require_tenant), x_t
     if not p or p["tenant_id"] != tenant_id:
         raise HTTPException(status_code=404, detail="proposal not found")
     set_proposal_status(proposal_id, ProposalStatus.REJECTED.value)
+    try:
+        track_event("kb_proposal_rejected", {"proposal_id": proposal_id})
+    except Exception:
+        pass
     return {"items": [{"ok": True, "status": ProposalStatus.REJECTED.value}], "meta": {}}
 
 @router.get(
