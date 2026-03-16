@@ -31,8 +31,10 @@ from app.config.settings import settings  # noqa: E402
 
 CURRICULA = [
     # ==================================================================
-    # ОГЭ Математика 2026 — 25 заданий (Ч1: 1-19 краткий, Ч2: 20-25 развёрнутый)
-    # Спецификация: https://fipi.ru/oge/demoversii-specifikacii-kodifikatory
+    # ОГЭ Математика 2026 — 25 заданий
+    # Ч1 (1–19): краткий ответ, 1 балл; Ч2 (20–25): развёрнутый, до 2 баллов
+    # Источник: КИМ ФИПИ 2026, спецификация МА-9 ОГЭ 2026_СПЕЦ
+    # Структура не изменилась по сравнению с 2025 г.
     # ==================================================================
     {
         "code": "RU-OGE-MATH-2026",
@@ -41,34 +43,54 @@ CURRICULA = [
         "language": "ru",
         "status": "active",
         "nodes": [
-            # --- Практико-ориентированный блок (задания 1-5) ---
-            {"order": 1,  "uid": "TOP-OGE-PRAKTIKO-ORIENTIROVANNYE-ZADACHI-2026", "task": "1"},
-            {"order": 2,  "uid": "TOP-MATH-NUMBERS-CALCULATIONS",                "task": "2,6"},
-            {"order": 3,  "uid": "TOP-EDINITSY-IZMERENIYA-002",                   "task": "3"},
-            {"order": 4,  "uid": "TOP-MATH-APPLIED-MATH",                         "task": "4"},
-            {"order": 5,  "uid": "TOP-OGE-ANALIZ-TABLITS-I-DIAGRAMM-2026",       "task": "5"},
-            # --- Алгебра (задания 6-14) ---
-            {"order": 6,  "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",                  "task": "7,8,12"},
-            {"order": 7,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",                   "task": "9"},
-            {"order": 8,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",              "task": "10,19"},
-            {"order": 9,  "uid": "TOP-MATH-FUNCTIONS-GRAPHS",                    "task": "11"},
-            {"order": 10, "uid": "TOP-MATH-INEQUALITIES",                        "task": "13"},
-            {"order": 11, "uid": "TOP-MATH-PROGRESSIONS",                        "task": "14"},
-            # --- Геометрия (задания 15-19) ---
-            {"order": 12, "uid": "TOP-UGLY-9cbfc3",                              "task": "15"},
-            {"order": 13, "uid": "TOP-PERIMETR-I-PLOSHCHAD-003",                 "task": "16"},
-            {"order": 14, "uid": "TOP-MATH-PLANE-GEOMETRY",                      "task": "17,18"},
-            # --- Часть 2: развёрнутый ответ (задания 20-25) ---
-            {"order": 15, "uid": "TOP-MATH-ADVANCED-ALGEBRA",                    "task": "20"},
-            {"order": 16, "uid": "TOP-TEKSTOVYE-ZADACHI-004",                    "task": "21"},
-            {"order": 17, "uid": "TOP-MATH-ADVANCED-FUNCTIONS",                  "task": "22"},
-            {"order": 18, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM",                 "task": "23,25"},
-            {"order": 19, "uid": "TOP-OGE-GEOMETRICHESKOE-DOKAZATELSTVO-2026",   "task": "24"},
+            # --- Часть 1: краткий ответ (задания 1–19) ---
+            # Задания 1–4: единый практикоориентированный блок (общий текст-условие)
+            # Проверяют применение математики из всех разделов в реальной ситуации
+            {"order": 1,  "uid": "TOP-OGE-PRAKTIKO-ORIENTIROVANNYE-ZADACHI-2026", "task": "1,2,3,4"},
+            # Задание 5: статистика — чтение таблиц и диаграмм
+            {"order": 2,  "uid": "TOP-OGE-ANALIZ-TABLITS-I-DIAGRAMM-2026",        "task": "5"},
+            # Задания 6–7: числа, действия, координатная прямая
+            {"order": 3,  "uid": "TOP-MATH-NUMBERS-CALCULATIONS",                 "task": "6,7"},
+            # Задание 8: алгебраические преобразования (формулы сокращённого умножения)
+            {"order": 4,  "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",                   "task": "8,12"},
+            # Задание 9: линейные/квадратные уравнения, системы, линейные неравенства
+            {"order": 5,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",                    "task": "9"},
+            # Задание 10: вероятность (классическое определение)
+            {"order": 6,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",               "task": "10"},
+            # Задание 11: функции — построение и чтение графиков
+            {"order": 7,  "uid": "TOP-MATH-FUNCTIONS-GRAPHS",                     "task": "11"},
+            # Задание 13: неравенства — дробно-рациональные, координатная прямая (выбор ответа)
+            {"order": 8,  "uid": "TOP-MATH-INEQUALITIES",                         "task": "13"},
+            # Задание 14: арифметическая и геометрическая прогрессии
+            {"order": 9,  "uid": "TOP-MATH-PROGRESSIONS",                         "task": "14"},
+            # Задание 15: планиметрия — теорема Пифагора, тригонометрия в прямоугольном треугольнике
+            {"order": 10, "uid": "TOP-PERIMETR-I-PLOSHCHAD-003",                  "task": "15"},
+            # Задание 16: вписанные/описанные окружности, углы
+            {"order": 11, "uid": "TOP-OKRUZHNOST-926fe8",                         "task": "16"},
+            # Задания 17–18: свойства трапеции, параллелограмма; площади, объём параллелепипеда
+            {"order": 12, "uid": "TOP-MATH-PLANE-GEOMETRY",                       "task": "17,18"},
+            # Задание 19: логика — истинные и ложные высказывания
+            {"order": 13, "uid": "TOP-VYSKAZYVANIYA-efcd74",                      "task": "19"},
+            # --- Часть 2: развёрнутый ответ (задания 20–25) ---
+            # Задание 20: уравнения/системы (алгебра, в т.ч. нелинейные)
+            {"order": 14, "uid": "TOP-MATH-ADVANCED-ALGEBRA",                     "task": "20"},
+            # Задание 21: текстовая задача (составление уравнения/системы по условию)
+            {"order": 15, "uid": "TOP-TEKSTOVYE-ZADACHI-004",                     "task": "21"},
+            # Задание 22: функции с параметром — нахождение значений параметра
+            {"order": 16, "uid": "TOP-MATH-ADVANCED-FUNCTIONS",                   "task": "22"},
+            # Задание 23: вычислительная планиметрия (подобие, Пифагор, тригонометрия)
+            {"order": 17, "uid": "TOP-MATH-PLANE-GEOMETRY",                       "task": "23"},
+            # Задание 24: планиметрия с доказательством
+            {"order": 18, "uid": "TOP-OGE-GEOMETRICHESKOE-DOKAZATELSTVO-2026",    "task": "24"},
+            # Задание 25: сложная планиметрия (вписанные окружности, расстояния, площади)
+            {"order": 19, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM",                  "task": "25"},
         ],
     },
     # ==================================================================
-    # ЕГЭ Базовый Математика 2026 — 21 задание (все — краткий ответ)
-    # Спецификация: https://fipi.ru/ege/demoversii-specifikacii-kodifikatory
+    # ЕГЭ Базовый Математика 2026 — 21 задание (все краткий ответ, базовый уровень)
+    # Максимум 21 балл, время 3 часа
+    # Источник: КИМ ФИПИ 2026, спецификация МА-11 ЕГЭ 2026 СПЕЦ_базовый
+    # Структура не изменилась по сравнению с 2025 г.
     # ==================================================================
     {
         "code": "RU-EGE-BASE-MATH-2026",
@@ -77,31 +99,47 @@ CURRICULA = [
         "language": "ru",
         "status": "active",
         "nodes": [
-            # Вычисления и преобразования
-            {"order": 1,  "uid": "TOP-MATH-NUMBERS-CALCULATIONS",    "task": "1,15,19"},
-            {"order": 2,  "uid": "TOP-TEKSTOVYE-ZADACHI-004",        "task": "2,20"},
-            {"order": 3,  "uid": "TOP-OGE-ANALIZ-TABLITS-I-DIAGRAMM-2026", "task": "3"},
-            {"order": 4,  "uid": "TOP-EDINITSY-IZMERENIYA-002",      "task": "4"},
-            {"order": 5,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",  "task": "5,8"},
-            # Графики и функции
-            {"order": 6,  "uid": "TOP-MATH-APPLIED-MATH",            "task": "6"},
-            {"order": 7,  "uid": "TOP-MATH-FUNCTIONS-GRAPHS",        "task": "7"},
-            # Планиметрия и стереометрия
-            {"order": 8,  "uid": "TOP-PERIMETR-I-PLOSHCHAD-003",     "task": "9"},
-            {"order": 9,  "uid": "TOP-MATH-PLANE-GEOMETRY",          "task": "10,12"},
-            {"order": 10, "uid": "TOP-MATH-STEREOMETRY",             "task": "11,13"},
-            # Преобразования и уравнения
-            {"order": 11, "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",      "task": "14,16"},
-            {"order": 12, "uid": "TOP-MATH-EQUATIONS-SYSTEMS",       "task": "17"},
-            {"order": 13, "uid": "TOP-MATH-INEQUALITIES",            "task": "18"},
-            # Комплексные задачи
-            {"order": 14, "uid": "TOP-MATH-ADVANCED-ALGEBRA",        "task": "21"},
+            # Задание 1: вычисления — степени, корни, числовые выражения
+            {"order": 1,  "uid": "TOP-MATH-NUMBERS-CALCULATIONS",                 "task": "1"},
+            # Задание 2: текстовые задачи, оценка размеров объектов
+            {"order": 2,  "uid": "TOP-TEKSTOVYE-ZADACHI-004",                     "task": "2"},
+            # Задание 3: извлечение информации из таблиц, диаграмм, графиков
+            {"order": 3,  "uid": "TOP-OGE-ANALIZ-TABLITS-I-DIAGRAMM-2026",        "task": "3"},
+            # Задание 4: вычисления и преобразования; текстовые задачи
+            {"order": 4,  "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",                   "task": "4"},
+            # Задание 5: вероятность (простейшие случаи)
+            {"order": 5,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",               "task": "5"},
+            # Задание 6: таблицы и диаграммы (более сложный уровень)
+            {"order": 6,  "uid": "TOP-GRAFICHESKOE-PREDSTAVLEN-c2da9b",           "task": "6"},
+            # Задание 7: функции — производная, описание поведения по графику
+            {"order": 7,  "uid": "TOP-MATH-FUNCTIONS-GRAPHS",                     "task": "7"},
+            # Задание 8: доказательные рассуждения, логика
+            {"order": 8,  "uid": "TOP-VYSKAZYVANIYA-efcd74",                      "task": "8"},
+            # Задания 9–10: теоремы планиметрии
+            {"order": 9,  "uid": "TOP-MATH-PLANE-GEOMETRY",                       "task": "9,10,12"},
+            # Задания 11, 13: стереометрия (объёмы, площади поверхностей)
+            {"order": 10, "uid": "TOP-MATH-STEREOMETRY",                          "task": "11,13"},
+            # Задания 14, 16: вычисления и преобразования выражений
+            {"order": 11, "uid": "TOP-MATH-ALGEBRA-TRANSFORMS",                   "task": "14,16"},
+            # Задание 15: вычисления; текстовые задачи
+            {"order": 12, "uid": "TOP-MATH-NUMBERS-CALCULATIONS",                 "task": "15"},
+            # Задание 17: уравнения — рациональные, иррациональные, показательные, тригонометрические, логарифмические
+            {"order": 13, "uid": "TOP-MATH-EQUATIONS-SYSTEMS",                    "task": "17"},
+            # Задание 18: неравенства — рациональные, показательные, логарифмические
+            {"order": 14, "uid": "TOP-MATH-INEQUALITIES",                         "task": "18"},
+            # Задание 19: финансово-экономические задачи (проценты, кредиты)
+            {"order": 15, "uid": "TOP-EGE-FINANSOVAYA-MATEMATIKA-2026",           "task": "19"},
+            # Задание 20: текстовые задачи (решение уравнений)
+            {"order": 16, "uid": "TOP-TEKSTOVYE-ZADACHI-004",                     "task": "20"},
+            # Задание 21: комплексная задача — вычисления, текстовые задачи, выбор метода
+            {"order": 17, "uid": "TOP-MATH-ADVANCED-ALGEBRA",                     "task": "21"},
         ],
     },
     # ==================================================================
     # ЕГЭ Профиль Математика 2026 — 19 заданий
-    # Часть 1 (1-12): краткий ответ; Часть 2 (13-19): развёрнутый ответ
-    # Спецификация: https://fipi.ru/ege/demoversii-specifikacii-kodifikatory
+    # Ч1 (1–12): краткий ответ; Ч2 (13–19): развёрнутый ответ
+    # Источник: КИМ ФИПИ 2026, спецификация МА-11 ЕГЭ 2026 СПЕЦ_профильный
+    # Структура не изменилась по сравнению с 2025 г.
     # ==================================================================
     {
         "code": "RU-EGE-PROF-MATH-2026",
@@ -110,26 +148,47 @@ CURRICULA = [
         "language": "ru",
         "status": "active",
         "nodes": [
-            # --- Часть 1 (задания 1–12, краткий ответ) ---
-            {"order": 1,  "uid": "TOP-MATH-PLANE-GEOMETRY",              "task": "1"},
-            {"order": 2,  "uid": "TOP-VEKTORY-78d40c",                   "task": "2"},
-            {"order": 3,  "uid": "TOP-MATH-STEREOMETRY",                 "task": "3"},
-            {"order": 4,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",      "task": "4"},
-            {"order": 5,  "uid": "TOP-MATH-COMBINATORICS",               "task": "5"},
-            {"order": 6,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",           "task": "6"},
-            {"order": 7,  "uid": "TOP-MATH-EXP-LOG",                     "task": "7"},
-            {"order": 8,  "uid": "TOP-MATH-DERIVATIVES",                 "task": "8"},
-            {"order": 9,  "uid": "TOP-MATH-APPLIED-MATH",                "task": "9"},
-            {"order": 10, "uid": "TOP-TEKSTOVYE-ZADACHI-004",            "task": "10"},
-            {"order": 11, "uid": "TOP-MATH-FUNCTIONS-GRAPHS",            "task": "11,12"},
-            # --- Часть 2 (задания 13–19, развёрнутый ответ) ---
-            {"order": 13, "uid": "TOP-MATH-ADVANCED-TRIG",               "task": "13"},
-            {"order": 14, "uid": "TOP-MATH-STEREOMETRY-ADVANCED",        "task": "14"},
-            {"order": 15, "uid": "TOP-MATH-COMPLEX-INEQUALITIES",        "task": "15"},
-            {"order": 16, "uid": "TOP-MATH-FINANCIAL-ADVANCED",          "task": "16"},
-            {"order": 17, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM-PROOF",   "task": "17"},
-            {"order": 18, "uid": "TOP-EGE-ZADACHI-S-PARAMETROM-2026",    "task": "18"},
-            {"order": 19, "uid": "TOP-EGE-TEORIYA-CHISEL-DELIMOST-2026", "task": "19"},
+            # --- Часть 1: краткий ответ (задания 1–12, базовый/повышенный уровень) ---
+            # Задание 1 (Б): планиметрия — площадь, длина, угол, подобие
+            {"order": 1,  "uid": "TOP-MATH-PLANE-GEOMETRY",                       "task": "1"},
+            # Задание 2 (Б): векторы — координаты, сумма, скалярное произведение, угол
+            {"order": 2,  "uid": "TOP-VEKTORY-78d40c",                            "task": "2"},
+            # Задание 3 (Б): стереометрия — двугранный угол, расстояния, объём
+            {"order": 3,  "uid": "TOP-MATH-STEREOMETRY",                          "task": "3"},
+            # Задание 4 (Б): теория вероятностей базовая — классическая вероятность
+            {"order": 4,  "uid": "TOP-MATH-PROBABILITY-STATISTICS",               "task": "4"},
+            # Задание 5 (П): теория вероятностей — формулы сложения/умножения, комбинаторика, геом. вероятность
+            {"order": 5,  "uid": "TOP-MATH-COMBINATORICS",                        "task": "5"},
+            # Задание 6 (Б): уравнения и неравенства — линейные, квадратные, простые системы
+            {"order": 6,  "uid": "TOP-MATH-EQUATIONS-SYSTEMS",                    "task": "6"},
+            # Задание 7 (Б): степени и логарифмы — вычисления и преобразования выражений
+            # (НЕ уравнения! Упрощение, вычисление значений: a^(log_a b), √, дробно-рациональные)
+            {"order": 7,  "uid": "TOP-MATH-EXP-LOG",                              "task": "7"},
+            # Задание 8 (Б): производная и интеграл — экстремум, наиб/наим значение, касательная, площадь
+            {"order": 8,  "uid": "TOP-MATH-DERIVATIVES",                          "task": "8"},
+            # Задание 9 (П): математическое моделирование — составление уравнений/систем по условию
+            {"order": 9,  "uid": "TOP-MATH-APPLIED-MATH",                         "task": "9"},
+            # Задание 10 (П): текстовые задачи — смеси, работа, движение, оценка правдоподобности
+            {"order": 10, "uid": "TOP-TEKSTOVYE-ZADACHI-004",                     "task": "10"},
+            # Задание 11 (П): свойства и графики функций — решение уравнений через графики и свойства
+            {"order": 11, "uid": "TOP-MATH-FUNCTIONS-GRAPHS",                     "task": "11"},
+            # Задание 12 (П): исследование функции через производную — экстремумы, монотонность
+            {"order": 12, "uid": "TOP-MATH-CALCULUS",                             "task": "12"},
+            # --- Часть 2: развёрнутый ответ (задания 13–19) ---
+            # Задание 13 (П, 2 балла): тригонометрические уравнения с отбором корней на промежутке
+            {"order": 13, "uid": "TOP-MATH-ADVANCED-TRIG",                        "task": "13"},
+            # Задание 14 (П, 3 балла): стереометрия с доказательством — двугранные углы, расстояния, сечения
+            {"order": 14, "uid": "TOP-MATH-STEREOMETRY-ADVANCED",                 "task": "14"},
+            # Задание 15 (П, 2 балла): показательные и логарифмические уравнения/неравенства
+            {"order": 15, "uid": "TOP-MATH-COMPLEX-INEQUALITIES",                 "task": "15"},
+            # Задание 16 (П, 2 балла): финансово-экономические задачи — кредиты, проценты, личные финансы
+            {"order": 16, "uid": "TOP-MATH-FINANCIAL-ADVANCED",                   "task": "16"},
+            # Задание 17 (П, 3 балла): планиметрия с доказательством — вписанные/описанные фигуры
+            {"order": 17, "uid": "TOP-MATH-ADVANCED-PLANE-GEOM-PROOF",            "task": "17"},
+            # Задание 18 (В, 4 балла): задачи с параметром — системы/неравенства, свойства функций
+            {"order": 18, "uid": "TOP-EGE-ZADACHI-S-PARAMETROM-2026",             "task": "18"},
+            # Задание 19 (В, 4 балла): теория чисел/комбинаторика — делимость, НОД/НОК, чётность
+            {"order": 19, "uid": "TOP-EGE-TEORIYA-CHISEL-DELIMOST-2026",          "task": "19"},
         ],
     },
 ]

@@ -221,20 +221,9 @@ async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) ->
     try:
         cypher = """
             MATCH (t:Topic {uid: $uid})-[:REQUIRES_SKILL]->(sk:Skill)-[:HAS_METHOD]->(m:Method)
-            WITH t, sk, m,
-                 CASE WHEN $user_class IS NULL THEN false
-                      ELSE EXISTS {
-                          MATCH (t)-[:REQUIRES_SKILL]->(:Skill)-[:HAS_METHOD]->(gm:Method)
-                          WHERE gm.user_class_min IS NOT NULL
-                      }
-                 END AS has_graded
             WHERE $user_class IS NULL
-                  OR (has_graded AND m.user_class_min IS NOT NULL
-                      AND m.user_class_min <= $user_class
-                      AND m.user_class_max >= $user_class)
-                  OR (NOT has_graded
-                      AND (m.user_class_min IS NULL OR m.user_class_min <= $user_class)
-                      AND (m.user_class_max IS NULL OR m.user_class_max >= $user_class))
+                  OR m.user_class_min IS NULL
+                  OR (m.user_class_min <= $user_class AND m.user_class_max >= $user_class)
             OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
             WITH t, sk, m, count(ex) AS example_count
             RETURN
@@ -256,7 +245,7 @@ async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) ->
     finally:
         repo.close()
 
-    items = [
+    raw_items = [
         {
             "uid":            r.get("uid") or "",
             "title":          r.get("title") or "",
@@ -272,6 +261,21 @@ async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) ->
         for r in rows
         if r.get("uid")
     ]
+
+    # Deduplicate by title: multiple Method nodes may exist for the same
+    # concept (e.g. grade-band copies without class range properties set).
+    # Prefer methods with grade restrictions over ungraded ones; on tie keep first.
+    seen_titles: dict[str, dict] = {}
+    for item in raw_items:
+        title = item["title"]
+        if title not in seen_titles:
+            seen_titles[title] = item
+        else:
+            existing = seen_titles[title]
+            # Prefer graded method over ungraded duplicate
+            if existing["user_class_min"] is None and item["user_class_min"] is not None:
+                seen_titles[title] = item
+    items = list(seen_titles.values())
 
     # NOTE: semantic text-stemming filter was removed.  The Cypher path
     # Topic→REQUIRES_SKILL→Skill→HAS_METHOD→Method already guarantees
@@ -392,6 +396,45 @@ async def viewport_advanced(payload: ViewportAdvancedRequest) -> Dict:
             "student_tier": payload.student_tier,
             "total_nodes": len(nodes),
         },
+    }
+
+
+class NextPrereqResponse(BaseModel):
+    uid: str
+    title: str
+    weight: float
+
+
+@router.get("/topic/{uid}/next-prereq", summary="Get next topic via highest PREREQ weight")
+async def get_next_prereq_topic(uid: str) -> Dict:
+    """Return the topic that should be studied after completing `uid`.
+
+    Direction: (next_topic)-[:PREREQ {weight}]->(completed_topic). Topics where
+    `uid` is a direct prerequisite are candidates for "what's next". The one with
+    the highest weight is returned.
+    """
+    drv = get_driver()
+    try:
+        with drv.session() as s:
+            record = s.run(
+                """
+                MATCH (next:Topic)-[r:PREREQ]->(t:Topic {uid: $uid})
+                RETURN next.uid AS uid, next.title AS title, r.weight AS weight
+                ORDER BY r.weight DESC
+                LIMIT 1
+                """,
+                {"uid": uid},
+            ).single()
+    finally:
+        drv.close()
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="No next topic found for this uid")
+
+    return {
+        "uid": record["uid"],
+        "title": record["title"],
+        "weight": record["weight"] or 0,
     }
 
 
