@@ -207,23 +207,60 @@ async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
         "meta": {},
     }
 
+def _apply_learning_mode_filter(
+    items: list,
+    user_class: Optional[int],
+    learning_mode: str,
+) -> list:
+    """Filter method items by learning_mode + user_class.
+
+    NULL boundaries are normalised: user_class_min=NULL→2, user_class_max=NULL→11.
+    """
+    if user_class is None or learning_mode == "full_from_zero":
+        return items
+
+    result = []
+    for item in items:
+        min_c: int = item["user_class_min"] if item["user_class_min"] is not None else 2
+        max_c: int = item["user_class_max"] if item["user_class_max"] is not None else 11
+
+        if learning_mode == "quick_current_level":
+            if min_c <= user_class <= max_c:
+                result.append(item)
+        elif learning_mode == "review_up_to_my_class":
+            if min_c <= user_class:
+                result.append(item)
+        elif learning_mode == "current_level_and_above":
+            if max_c >= user_class:
+                result.append(item)
+        else:
+            result.append(item)
+    return result
+
+
 @router.get("/topic/{topic_uid}/methods", response_model=StandardResponse, summary="List Methods for a Topic")
-async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) -> Dict:
+async def get_topic_methods(
+    topic_uid: str,
+    user_class: Optional[int] = None,
+    learning_mode: Optional[str] = None,
+) -> Dict:
     """Return all Method nodes reachable from a Topic via Topic→REQUIRES_SKILL→Skill→HAS_METHOD→Method.
 
-    Used by the frontend to discover which Method UIDs are available for a Topic
-    before calling /stage/start with kb_unit_uid=method_uid.
+    ``learning_mode`` controls grade filtering:
+      - ``quick_current_level``      — min_c ≤ user_class ≤ max_c
+      - ``review_up_to_my_class``    — min_c ≤ user_class  (default when user_class given)
+      - ``current_level_and_above``  — max_c ≥ user_class
+      - ``full_from_zero``           — no grade filter
 
-    If ``user_class`` is provided (1-11), only Methods whose class range includes
-    the given grade are returned (NULL boundaries are treated as "no restriction").
+    NULL boundaries are normalised: user_class_min=NULL→2, user_class_max=NULL→11.
     """
+    effective_mode = learning_mode or ("review_up_to_my_class" if user_class is not None else "full_from_zero")
+
     repo = Neo4jRepo()
     try:
+        # Fetch ALL methods; Python-side filtering applies the mode logic.
         cypher = """
             MATCH (t:Topic {uid: $uid})-[:REQUIRES_SKILL]->(sk:Skill)-[:HAS_METHOD]->(m:Method)
-            WHERE $user_class IS NULL
-                  OR m.user_class_min IS NULL
-                  OR (m.user_class_min <= $user_class AND m.user_class_max >= $user_class)
             OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
             WITH t, sk, m, count(ex) AS example_count
             RETURN
@@ -232,26 +269,31 @@ async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) ->
                 m.description  AS description,
                 m.user_class_min AS user_class_min,
                 m.user_class_max AS user_class_max,
+                m.method_role  AS method_role,
+                m.learning_order AS learning_order,
                 sk.uid         AS skill_uid,
                 sk.title       AS skill_title,
                 t.uid          AS topic_uid,
                 t.title        AS topic_title,
                 example_count
             ORDER BY
+                m.learning_order ASC,
                 m.user_class_min ASC,
                 m.title ASC
             """
-        rows = repo.read(cypher, {"uid": topic_uid, "user_class": user_class})
+        rows = repo.read(cypher, {"uid": topic_uid})
     finally:
         repo.close()
 
-    raw_items = [
+    all_items = [
         {
             "uid":            r.get("uid") or "",
             "title":          r.get("title") or "",
             "description":    r.get("description") or "",
             "user_class_min": r.get("user_class_min"),
             "user_class_max": r.get("user_class_max"),
+            "method_role":    r.get("method_role") or "core",
+            "learning_order": r.get("learning_order") or 0,
             "skill_uid":      r.get("skill_uid") or "",
             "skill_title":    r.get("skill_title") or "",
             "topic_uid":      r.get("topic_uid") or topic_uid,
@@ -262,29 +304,41 @@ async def get_topic_methods(topic_uid: str, user_class: Optional[int] = None) ->
         if r.get("uid")
     ]
 
-    # Deduplicate by title: multiple Method nodes may exist for the same
-    # concept (e.g. grade-band copies without class range properties set).
-    # Prefer methods with grade restrictions over ungraded ones; on tie keep first.
-    seen_titles: dict[str, dict] = {}
-    for item in raw_items:
+    # Deduplicate by title: prefer graded method over ungraded duplicate.
+    seen_titles: dict = {}
+    for item in all_items:
         title = item["title"]
         if title not in seen_titles:
             seen_titles[title] = item
         else:
             existing = seen_titles[title]
-            # Prefer graded method over ungraded duplicate
             if existing["user_class_min"] is None and item["user_class_min"] is not None:
                 seen_titles[title] = item
-    items = list(seen_titles.values())
+    deduped = list(seen_titles.values())
 
-    # NOTE: semantic text-stemming filter was removed.  The Cypher path
-    # Topic→REQUIRES_SKILL→Skill→HAS_METHOD→Method already guarantees
-    # relevance via the graph structure; the old text filter used a
-    # naive Russian stemmer that could incorrectly drop valid methods
-    # (e.g. when method description wording didn't overlap with the
-    # topic title).
+    # Apply mode-based grade filter.
+    items = _apply_learning_mode_filter(deduped, user_class, effective_mode)
 
-    return {"items": items, "meta": {"topic_uid": topic_uid, "total": len(items)}}
+    # Build empty-route metadata for quick_current_level.
+    empty_route = False
+    empty_reason: Optional[str] = None
+    suggested_modes: list = []
+    if not items and effective_mode == "quick_current_level" and deduped:
+        empty_route = True
+        empty_reason = "no_methods_for_user_class"
+        suggested_modes = ["review_up_to_my_class", "full_from_zero"]
+
+    return {
+        "items": items,
+        "meta": {
+            "topic_uid": topic_uid,
+            "total": len(items),
+            "learning_mode": effective_mode,
+        },
+        "empty_route": empty_route,
+        "empty_reason": empty_reason,
+        "suggested_modes": suggested_modes,
+    }
 
 
 @router.get("/viewport", response_model=StandardResponse)
@@ -518,7 +572,7 @@ async def chat(payload: ChatInput, request: Request) -> Dict:
     resp = await openai_chat_async(
         messages,
         temperature=0.2,
-        model="gpt-4o-mini",
+        model=settings.fast_model,
         feature="engine_relation_chat",
         max_tokens=350,
     )
@@ -699,7 +753,7 @@ async def roadmap(payload: RoadmapRequest, request: Request) -> Dict:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                model="gpt-4o-mini",
+                model=settings.fast_model,
                 feature="engine_roadmap_select",
                 max_tokens=650,
                 response_format={"type": "json_object"},
@@ -814,6 +868,7 @@ class TopicsAvailableRequest(BaseModel):
     curriculum_code: Optional[str] = None
     goal_type: Optional[GoalType] = None
     exam_type: Optional[ExamType] = None
+    ignore_user_class_filter: bool = False
 
     @field_validator('exam_type', mode='before')
     @classmethod
@@ -865,10 +920,13 @@ def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: 
                 mx_val = int(mx) if mx is not None else None
 
                 is_exam = payload.goal_type == GoalType.exam
+                ignore_user_class_filter = payload.ignore_user_class_filter
 
                 # Olympiad tier: no grade restrictions at all
                 if student_tier == "olympiad":
                     pass  # skip all grade-based filtering
+                elif ignore_user_class_filter:
+                    pass
                 elif is_exam:
                     # Memory 01KG0022Y97B03DEJ3W11AA854:
                     # Filters topics by curriculum grade limits for exams (OGE<=9, EGE<=11).
@@ -1491,6 +1549,40 @@ async def _q_cache_store(topic_uid: str, difficulty: int, question: Dict) -> Non
         pass
 
 
+def _try_eval_function_at_point(question_text: str) -> float | None:
+    """Attempt to evaluate y = f(x) at a given x from question text.
+
+    Detects patterns like 'y = x^2 - 4 ... x = 2' and returns the expected
+    numeric value using Python eval (restricted scope, no imports).
+    Returns None if not applicable or evaluation fails.
+    """
+    text = (question_text or "").replace("^", "**")
+    # Find variable assignment like 'x = 2' or 'при x = 2'
+    m_assign = re.search(r"\bx\s*=\s*([-+]?\d+(?:[.,]\d+)?)\b", text)
+    if not m_assign:
+        return None
+    try:
+        x_val = float(m_assign.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+    # Find function definition like 'y = <expr>' or 'f(x) = <expr>'
+    m_func = re.search(r"(?:y|f\s*\(\s*x\s*\))\s*=\s*([^=.?!,;:\n]+)", text)
+    if not m_func:
+        return None
+    expr = m_func.group(1).strip()
+    # Skip if the match is just the assignment itself (e.g. 'y = 0')
+    if re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", expr):
+        return None
+    # Restrict eval: only allow math ops and 'x'
+    allowed_names = {"x": x_val, "abs": abs}
+    try:
+        result = eval(expr, {"__builtins__": {}}, allowed_names)  # noqa: S307
+        return float(result)
+    except Exception:
+        return None
+
+
 async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: bool = False, previous_prompts: List[str] = [], difficulty: int = 5) -> Dict:
     # 0. Cache check — skips Neo4j + LLM for 60-70% of requests
     cached = await _q_cache_get(topic_uid, difficulty, exclude_uids)
@@ -1677,6 +1769,9 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     - If visual=false, do not reference figures.
     - Coordinates mentioned in text must match visualization.
     - For quadratic with two roots, include both roots in the correct answer.
+    - CRITICAL math rule: if the question asks to evaluate a function at a point (e.g. y = f(x) at x = a),
+      compute the result step-by-step BEFORE writing options. Example: y = x^2 - 4 at x = 2:
+      step 1: x^2 = 4, step 2: 4 - 4 = 0, answer = 0. Write the proof in math_consistency_proof.
 
     JSON Structure:
     {json_structure}
@@ -1692,7 +1787,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             res = await openai_chat_async(
                 messages,
                 temperature=0.35,
-                model="gpt-4o-mini",
+                model=settings.lesson_model,
                 feature="assessment_question_generate",
                 max_tokens=520,
                 response_format={"type": "json_object"},
@@ -1770,6 +1865,46 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                         f"fractions or decimals ({', '.join(bad_opts[:2])}). "
                         "Rewrite so every option is a positive whole integer."
                     )
+
+            # Check 4: math correctness for function-evaluation single_choice questions.
+            # Detects 'y = f(x)' pattern and verifies the marked correct option.
+            if q_type == "single_choice" and data.get("options"):
+                expected = _try_eval_function_at_point(prompt_gen)
+                if expected is not None:
+                    correct_opts = [o for o in data["options"] if o.get("is_correct")]
+                    if correct_opts:
+                        try:
+                            marked_val = float(str(correct_opts[0].get("text", "")).strip().replace(",", "."))
+                            if abs(marked_val - expected) >= 1e-6:
+                                if attempt < 1:
+                                    correction_requests.append(
+                                        f"Math error detected: for this function-evaluation question "
+                                        f"the correct answer should be {expected:g}, but you marked "
+                                        f"'{correct_opts[0].get('text')}'. "
+                                        f"Recalculate step-by-step and fix the is_correct flags."
+                                    )
+                                else:
+                                    # Force-fix on last attempt: find the option closest to expected value
+                                    best = None
+                                    best_diff = float("inf")
+                                    for opt in data["options"]:
+                                        try:
+                                            v = float(str(opt.get("text", "")).strip().replace(",", "."))
+                                            if abs(v - expected) < best_diff:
+                                                best_diff = abs(v - expected)
+                                                best = opt
+                                        except (ValueError, TypeError):
+                                            pass
+                                    if best and best_diff < 1e-6:
+                                        for opt in data["options"]:
+                                            opt["is_correct"] = (opt is best)
+                                        logger.warning(
+                                            "llm_math_correction_forced",
+                                            expected=expected,
+                                            fixed_to=best.get("text"),
+                                        )
+                        except (ValueError, TypeError):
+                            pass
 
             if correction_requests and attempt < 1:
                 logger.info("llm_retry_corrections", issues=len(correction_requests), preview=prompt_gen[:60])
@@ -2018,7 +2153,7 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
                 "subject_uid": "",
                 "topic_uid": topic_uid,
                 "type": q_type,
-                "prompt": str(q.get("statement") or q.get("title") or ""),
+                "prompt": str(q.get("statement") or ""),
                 "options": q.get("options", []),
                 "is_visual": is_q_visual,
                 "visualization": db_visualization,

@@ -10,7 +10,15 @@ _RATE_LIMIT_COOLDOWN_UNTIL: float = 0.0
 _DEFAULT_RATE_LIMIT_COOLDOWN_SEC: float = 4.0
 _DEFAULT_MAX_TOKENS: int = 600
 _MAX_TOKENS_CAP: int = 650
-_FAST_MODEL: str = "gpt-4o-mini"
+_FAST_MODEL: str = settings.fast_model
+
+# Models that do not support custom temperature (only default=1 allowed)
+_NO_TEMPERATURE_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _supports_temperature(model: str) -> bool:
+    return not any(model.startswith(p) for p in _NO_TEMPERATURE_PREFIXES)
+
 
 # Singleton client — created once per process, reused across all calls
 _openai_client = None
@@ -76,16 +84,16 @@ async def openai_chat_async(
 
     try:
         client = _get_openai_client()
-        requested_model = model or _FAST_MODEL
-        model_to_use = _FAST_MODEL if requested_model != _FAST_MODEL else requested_model
+        model_to_use = model or _FAST_MODEL
         max_tokens_to_use = int(max_tokens or kwargs.pop("max_tokens", _DEFAULT_MAX_TOKENS))
         max_tokens_to_use = max(1, min(max_tokens_to_use, _MAX_TOKENS_CAP))
+        call_kwargs: dict[str, Any] = {"max_completion_tokens": max_tokens_to_use, **kwargs}
+        if _supports_temperature(model_to_use):
+            call_kwargs["temperature"] = temperature
         resp = await client.chat.completions.create(
             model=model_to_use,
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens_to_use,
-            **kwargs,
+            **call_kwargs,
         )
         content = (resp.choices[0].message.content or "").strip()
         usage_obj = getattr(resp, "usage", None)

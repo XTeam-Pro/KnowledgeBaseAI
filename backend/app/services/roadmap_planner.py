@@ -8,6 +8,42 @@ REBUILD_THRESHOLD = 0.15
 # In-memory cache for last roadmap per user/subject
 _roadmap_cache: Dict[str, Dict] = {}
 
+# Fallback titles for curriculum topic UIDs that may not yet have Topic nodes in Neo4j.
+# Used when building stub entries so the roadmap shows human-readable names.
+_CURRICULUM_UID_TITLES: Dict[str, str] = {
+    # OGE 2026
+    "TOP-OGE-PRAKTIKO-ORIENTIROVANNYE-ZADACHI-2026": "Практикоориентированные задачи",
+    "TOP-OGE-ANALIZ-TABLITS-I-DIAGRAMM-2026": "Анализ таблиц и диаграмм",
+    "TOP-OGE-GEOMETRICHESKOE-DOKAZATELSTVO-2026": "Геометрическое доказательство",
+    # EGE 2026
+    "TOP-EGE-FINANSOVAYA-MATEMATIKA-2026": "Финансовая математика",
+    "TOP-EGE-ZADACHI-S-PARAMETROM-2026": "Задачи с параметром",
+    "TOP-EGE-TEORIYA-CHISEL-DELIMOST-2026": "Теория чисел. Делимость",
+    # Common topic UIDs (in case they're missing from the graph)
+    "TOP-MATH-NUMBERS-CALCULATIONS": "Числа и вычисления",
+    "TOP-MATH-ALGEBRA-TRANSFORMS": "Алгебраические преобразования",
+    "TOP-MATH-EQUATIONS-SYSTEMS": "Уравнения и системы",
+    "TOP-MATH-PROBABILITY-STATISTICS": "Вероятность и статистика",
+    "TOP-MATH-FUNCTIONS-GRAPHS": "Функции и их графики",
+    "TOP-MATH-INEQUALITIES": "Неравенства",
+    "TOP-MATH-PROGRESSIONS": "Прогрессии",
+    "TOP-MATH-PLANE-GEOMETRY": "Планиметрия",
+    "TOP-MATH-ADVANCED-ALGEBRA": "Алгебра: задачи повышенного уровня",
+    "TOP-MATH-ADVANCED-FUNCTIONS": "Функции с параметром",
+    "TOP-MATH-ADVANCED-PLANE-GEOM": "Планиметрия: задачи повышенного уровня",
+    "TOP-MATH-ADVANCED-PLANE-GEOM-PROOF": "Планиметрия с доказательством",
+    "TOP-MATH-STEREOMETRY": "Стереометрия",
+    "TOP-MATH-STEREOMETRY-ADVANCED": "Стереометрия: повышенный уровень",
+    "TOP-MATH-EXP-LOG": "Степени и логарифмы",
+    "TOP-MATH-DERIVATIVES": "Производная и интеграл",
+    "TOP-MATH-CALCULUS": "Исследование функции",
+    "TOP-MATH-APPLIED-MATH": "Математическое моделирование",
+    "TOP-MATH-ADVANCED-TRIG": "Тригонометрические уравнения",
+    "TOP-MATH-COMPLEX-INEQUALITIES": "Показательные и логарифмические неравенства",
+    "TOP-MATH-FINANCIAL-ADVANCED": "Финансово-экономические задачи",
+    "TOP-MATH-COMBINATORICS": "Теория вероятностей и комбинаторика",
+}
+
 # Student tier configuration: (limit, select_count)
 TIER_CONFIG: Dict[str, Dict] = {
     "standard": {"limit": 30, "select": 8},
@@ -57,17 +93,15 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
 
     # Curriculum filter set
     allowed_topics = set()
+    root_nodes: List[str] = []
     if curriculum_code:
         cv = get_graph_view(curriculum_code)
         if cv.get("ok") and cv.get("nodes"):
-            # Fetch recursive prereqs for these nodes
-            root_nodes = [n["canonical_uid"] for n in cv["nodes"]]
-            if root_nodes:
-                res = s.run(
-                    "UNWIND $roots AS root MATCH (t:Topic {uid:root})-[:PREREQ*0..2]->(p:Topic) RETURN collect(DISTINCT p.uid) AS uids",
-                    {"roots": root_nodes}
-                ).single()
-                allowed_topics = set(res["uids"]) if res else set()
+            # Use only the explicitly seeded curriculum nodes — no PREREQ expansion.
+            # Prerequisites are used for ordering/priority scoring only (lines below),
+            # not as additional roadmap nodes.
+            root_nodes = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
+            allowed_topics = set(root_nodes)
 
     # Define query filter
     tid_filter_sub = "WHERE sub.tenant_id = $tid" if tenant_id else ""
@@ -133,15 +167,28 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
     drv.close()
     items.sort(key=lambda x: x["priority"], reverse=True)
 
-    # When curriculum is set, items are already filtered to curriculum topics only.
-    # Return them directly without fallback searches.
-    if curriculum_code and items:
-        if student_tier in ("gifted", "olympiad"):
-            result = _group_by_branch(items, select_count, progress)
-        else:
-            result = items[:select_count]
-        _roadmap_cache[cache_key] = {"items": result, "progress": dict(progress)}
-        return result
+    # When curriculum is set, return ALL curriculum topics.
+    # Add stubs for curriculum root nodes not found in Neo4j so the full
+    # curriculum always appears on the roadmap regardless of graph completeness.
+    if curriculum_code:
+        found_uids = {it["uid"] for it in items}
+        seen_stubs: set = set()
+        for uid in root_nodes:
+            if uid and uid not in found_uids and uid not in seen_stubs:
+                seen_stubs.add(uid)
+                mastered = float(progress.get(uid, 0.0) or 0.0)
+                items.append({
+                    "uid": uid,
+                    "title": _CURRICULUM_UID_TITLES.get(uid, uid),
+                    "mastered": mastered,
+                    "missing_prereqs": 0,
+                    "priority": max(0.0, 1.0 - mastered),
+                    "difficulty_level": 5,
+                })
+        items.sort(key=lambda x: x["priority"], reverse=True)
+        # Return ALL curriculum topics — no tier-based cap for exam curricula
+        _roadmap_cache[cache_key] = {"items": items, "progress": dict(progress)}
+        return items
 
     if len(items) >= effective_limit:
         result = items[:effective_limit]

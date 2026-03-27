@@ -5,6 +5,7 @@ import asyncio
 from app.services.kb.jsonl_io import load_jsonl, get_path
 from app.services.graph.neo4j_repo import Neo4jRepo
 from app.services.kb.builder import openai_chat_async
+from app.config.settings import settings
 import os
 
 def load_all_jsonl(filename: str) -> List[dict]:
@@ -50,7 +51,7 @@ async def generate_concepts_and_skills(topic: str, language: str) -> GeneratedBu
     ]
     res = await openai_chat_async(
         messages=messages,
-        model="gpt-4o-mini",
+        model=settings.fast_model,
         temperature=0.2,
         feature="ai_engine_concepts_skills",
         max_tokens=650,

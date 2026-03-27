@@ -107,6 +107,9 @@ def select_examples_for_topics(
                     continue
                 if r.get('uid') in exclude:
                     continue
+                # Skip rows without a real problem statement (section headers, empty titles etc.)
+                if not str(r.get('statement') or '').strip():
+                    continue
                 r['difficulty'] = _norm(d_raw)
                 
                 # Deserialize JSON fields if they are strings

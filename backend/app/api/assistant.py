@@ -9,6 +9,7 @@ from app.api.common import ApiError
 from app.events.publisher import get_redis
 from app.events.telemetry import track_event
 from app.services.kb.builder import openai_chat_async
+from app.config.settings import settings
 
 router = APIRouter(prefix="/v1/assistant", tags=["ИИ ассистент"])
 
@@ -123,7 +124,7 @@ async def chat(payload: AssistantChatInput, request: Request) -> Dict:
         res = await openai_chat_async(
             messages,
             temperature=0.2,
-            model="gpt-4o-mini",
+            model=settings.fast_model,
             feature="assistant_explain_relation",
             max_tokens=350,
         )
@@ -163,7 +164,7 @@ async def chat(payload: AssistantChatInput, request: Request) -> Dict:
     res = await openai_chat_async(
         messages,
         temperature=0.2,
-        model="gpt-4o-mini",
+        model=settings.fast_model,
         feature="assistant_free_chat",
         max_tokens=350,
     )

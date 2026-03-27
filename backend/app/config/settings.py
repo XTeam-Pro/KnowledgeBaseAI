@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     openai_api_key: SecretStr = Field(default=SecretStr(""), alias="OPENAI_API_KEY")
     gigachat_credentials: str = Field(default="", alias="GIGACHAT_CREDENTIALS")
+    fast_model: str = Field(default="gpt-4o-mini", alias="FAST_MODEL")
+    lesson_model: str = Field(default="gpt-4o-mini", alias="LESSON_MODEL")
 
     neo4j_uri: str = Field(default="", alias="KB_NEO4J_URI")
     neo4j_user: str = Field(default="", alias="NEO4J_USER")
