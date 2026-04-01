@@ -17,6 +17,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -30,6 +31,30 @@ _DEFAULT_KB_DIR = _SCRIPT_DIR.parent / "app" / "services" / "kb"
 # Internal fields that are NOT node properties
 _SKIP_ENTITY_FIELDS = frozenset({"_label", "tenant_id"})
 _SKIP_REL_FIELDS = frozenset({"_from_uid", "_to_uid", "_type", "tenant_id"})
+
+
+def _is_primitive(value: Any) -> bool:
+    return isinstance(value, (str, int, float, bool)) or value is None
+
+
+def _normalize_property_value(value: Any) -> Any:
+    """Neo4j properties must be primitives or arrays of primitives.
+
+    Nested structures are serialized to compact JSON strings.
+    """
+    if _is_primitive(value):
+        return value
+    if isinstance(value, list):
+        if all(_is_primitive(v) for v in value):
+            return value
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value)
+
+
+def _normalize_properties(props: dict[str, Any]) -> dict[str, Any]:
+    return {k: _normalize_property_value(v) for k, v in props.items()}
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -70,6 +95,7 @@ def _import_entities(session, entities: list[dict], tenant_id: str) -> int:
                 if not uid:
                     continue
                 props = {k: v for k, v in rec.items() if k not in _SKIP_ENTITY_FIELDS}
+                props = _normalize_properties(props)
                 props["uid"] = uid
                 props["tenant_id"] = tenant_id
                 tx.run(
@@ -104,6 +130,7 @@ def _import_relationships(session, rels: list[dict], tenant_id: str) -> tuple[in
                     skipped += 1
                     continue
                 extra = {k: v for k, v in rec.items() if k not in _SKIP_REL_FIELDS}
+                extra = _normalize_properties(extra)
                 if uid:
                     extra["uid"] = uid
                 extra["tenant_id"] = tenant_id
