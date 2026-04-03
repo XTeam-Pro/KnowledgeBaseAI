@@ -76,6 +76,7 @@ class AssistantChatInput(BaseModel):
     center_uid: Optional[str] = Field(None, description="Context: center node for viewport.")
     depth: int = 1
     subject_uid: Optional[str] = None
+    user_uid: Optional[str] = None
     progress: Dict[str, float] = {}
     limit: int = 30
     count: int = 10
@@ -139,14 +140,24 @@ async def chat(payload: AssistantChatInput, request: Request) -> Dict:
         return {"nodes": ns, "edges": es, "center_uid": payload.center_uid, "depth": payload.depth}
 
     if payload.action == "roadmap":
-        items = plan_route(payload.subject_uid, payload.progress, limit=payload.limit)
+        items = plan_route(
+            payload.subject_uid,
+            payload.progress,
+            limit=payload.limit,
+            user_uid=payload.user_uid,
+        )
         return {"items": items}
 
     if payload.action == "analytics":
         return await analytics_stats()
 
     if payload.action == "questions":
-        roadmap = plan_route(payload.subject_uid, payload.progress, limit=payload.count * 3)
+        roadmap = plan_route(
+            payload.subject_uid,
+            payload.progress,
+            limit=payload.count * 3,
+            user_uid=payload.user_uid,
+        )
         topic_uids = [it["uid"] for it in roadmap] or all_topic_uids_from_examples()
         examples = select_examples_for_topics(
             topic_uids=topic_uids,

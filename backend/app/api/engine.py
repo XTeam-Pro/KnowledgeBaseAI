@@ -617,6 +617,13 @@ class RoadmapResponse(BaseModel):
 @router.post("/roadmap", summary="Build adaptive roadmap", response_model=RoadmapResponse)
 async def roadmap(payload: RoadmapRequest, request: Request) -> Dict:
     _enforce_rate_limit(request, route_key="engine_roadmap", limit=30, window_sec=60)
+    attrs = payload.user_context.attributes or {}
+    user_uid = (
+        payload.user_uid
+        or attrs.get("user_uid")
+        or attrs.get("uid")
+        or attrs.get("user_id")
+    )
     # When curriculum_code is set, use plan_route for curriculum-aware topic selection
     if payload.curriculum_code:
         from app.services.roadmap_planner import plan_route
@@ -626,6 +633,7 @@ async def roadmap(payload: RoadmapRequest, request: Request) -> Dict:
             limit=payload.limit,
             curriculum_code=payload.curriculum_code,
             student_tier=payload.student_tier,
+            user_uid=str(user_uid) if user_uid else None,
         )
         nodes = []
         for idx, item in enumerate(items):
@@ -1207,6 +1215,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
 
 class AdaptiveQuestionsInput(BaseModel):
     subject_uid: Optional[str] = None
+    user_uid: Optional[str] = None
     progress: Dict[str, float]
     count: int = 10
     difficulty_min: int = 1
@@ -1216,7 +1225,13 @@ class AdaptiveQuestionsInput(BaseModel):
 @router.post("/adaptive_questions", summary="Get adaptive questions", response_model=StandardResponse)
 async def adaptive_questions(payload: AdaptiveQuestionsInput) -> Dict:
     tid = get_tenant_id()
-    roadmap_items = plan_route(payload.subject_uid, payload.progress, limit=payload.count * 3, tenant_id=tid)
+    roadmap_items = plan_route(
+        payload.subject_uid,
+        payload.progress,
+        limit=payload.count * 3,
+        tenant_id=tid,
+        user_uid=payload.user_uid,
+    )
     topic_uids = [it["uid"] for it in roadmap_items] or all_topic_uids_from_examples()
     examples = select_examples_for_topics(
         topic_uids=topic_uids,
@@ -1254,17 +1269,26 @@ async def test_out_questions(payload: TestOutQuestionsInput) -> Dict:
 
 class GapsRequest(BaseModel):
     subject_uid: str
+    user_uid: Optional[str] = None
     progress: Dict[str, float] = Field(default_factory=dict)
     goals: Optional[List[str]] = None
     prereq_threshold: float = 0.7
 
 @router.post("/gaps", response_model=StandardResponse)
 async def gaps(req: GapsRequest):
-    res = compute_gaps(req.subject_uid, req.progress, req.goals, req.prereq_threshold)
+    res = compute_gaps(
+        req.subject_uid,
+        req.progress,
+        req.goals,
+        req.prereq_threshold,
+        user_uid=req.user_uid,
+        tenant_id=get_tenant_id(),
+    )
     return {"items": [], "meta": res}
 
 class NextBestRequest(BaseModel):
     subject_uid: str
+    user_uid: Optional[str] = None
     progress: Dict[str, float] = Field(default_factory=dict)
     prereq_threshold: float = 0.7
     top_k: int = 5
@@ -1273,7 +1297,16 @@ class NextBestRequest(BaseModel):
 
 @router.post("/next-best-topic", response_model=StandardResponse)
 async def next_best_topic(req: NextBestRequest):
-    res = next_best_topics(req.subject_uid, req.progress, req.prereq_threshold, req.top_k, req.alpha, req.beta)
+    res = next_best_topics(
+        req.subject_uid,
+        req.progress,
+        req.prereq_threshold,
+        req.top_k,
+        req.alpha,
+        req.beta,
+        user_uid=req.user_uid,
+        tenant_id=get_tenant_id(),
+    )
     return {"items": res["items"], "meta": {}}
 
 class MasteryUpdateRequest(BaseModel):

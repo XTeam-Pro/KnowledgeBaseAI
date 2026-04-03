@@ -1,6 +1,11 @@
 from typing import Dict, List, Optional
 from app.services.graph import neo4j_repo
 from app.services.curriculum.repo import get_graph_view
+from app.services.personalization.prereq_weights_repo import get_personal_prereq_weight_factors
+from app.services.reasoning.prereq_scoring import (
+    compute_topic_prereq_state,
+    normalize_prereq_edges,
+)
 
 # Hysteresis threshold: only rebuild roadmap if mastery changed by >= 15%
 REBUILD_THRESHOLD = 0.15
@@ -75,14 +80,24 @@ def should_rebuild_roadmap(
     return False
 
 
-def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int = 30, penalty_factor: float = 0.15, tenant_id: str | None = None, curriculum_code: str | None = None, force_rebuild: bool = False, student_tier: str = "standard") -> List[Dict]:
+def plan_route(
+    subject_uid: str | None,
+    progress: Dict[str, float],
+    limit: int = 30,
+    penalty_factor: float = 0.15,
+    tenant_id: str | None = None,
+    curriculum_code: str | None = None,
+    force_rebuild: bool = False,
+    student_tier: str = "standard",
+    user_uid: str | None = None,
+) -> List[Dict]:
     # Apply tier-based limit override
     tier_cfg = TIER_CONFIG.get(student_tier, TIER_CONFIG["standard"])
     effective_limit = max(limit, tier_cfg["limit"])
     select_count = tier_cfg["select"]
 
     # Hysteresis check
-    cache_key = f"{tenant_id or ''}:{subject_uid or ''}:{curriculum_code or ''}:{student_tier}"
+    cache_key = f"{tenant_id or ''}:{subject_uid or ''}:{curriculum_code or ''}:{student_tier}:{user_uid or ''}"
     if not force_rebuild and not should_rebuild_roadmap(cache_key, progress):
         cached = _roadmap_cache.get(cache_key, {})
         if cached.get("items"):
@@ -114,8 +129,8 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
         rows = s.run(
             "UNWIND $uids AS uid MATCH (t:Topic {uid: uid}) "
             "WHERE ($tid IS NULL OR t.tenant_id = $tid) "
-            "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-            "RETURN t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
+            "OPTIONAL MATCH (t)-[pr:PREREQ]->(pre:Topic) "
+            "RETURN t.uid AS uid, t.title AS title, collect(DISTINCT {uid: pre.uid, weight: coalesce(pr.weight, 0.5), is_hard: coalesce(pr.is_hard, false)}) AS prereqs, "
             "coalesce(t.difficulty_level, 5) AS difficulty_level",
             {"uids": list(allowed_topics), "tid": tenant_id}
         ).data()
@@ -125,21 +140,26 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
             "MATCH (sub:Subject {uid:$su})-[:CONTAINS*2..3]->(t:Topic) "
             "WHERE ($tid IS NULL OR sub.tenant_id = $tid) "
             "AND ($tid IS NULL OR t.tenant_id = $tid) "
-            "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-            "RETURN DISTINCT t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
+            "OPTIONAL MATCH (t)-[pr:PREREQ]->(pre:Topic) "
+            "RETURN DISTINCT t.uid AS uid, t.title AS title, collect(DISTINCT {uid: pre.uid, weight: coalesce(pr.weight, 0.5), is_hard: coalesce(pr.is_hard, false)}) AS prereqs, "
             "coalesce(t.difficulty_level, 5) AS difficulty_level"
         )
         rows = s.run(query, {"su": subject_uid, "tid": tenant_id}).data()
     else:
         rows = s.run(
             "MATCH (t:Topic) WHERE ($tid IS NULL OR t.tenant_id = $tid) "
-            "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-            "RETURN t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
+            "OPTIONAL MATCH (t)-[pr:PREREQ]->(pre:Topic) "
+            "RETURN t.uid AS uid, t.title AS title, collect(DISTINCT {uid: pre.uid, weight: coalesce(pr.weight, 0.5), is_hard: coalesce(pr.is_hard, false)}) AS prereqs, "
             "coalesce(t.difficulty_level, 5) AS difficulty_level",
             {"tid": tenant_id}
         ).data()
 
     is_advanced = student_tier in ("gifted", "olympiad")
+    personal_factors = get_personal_prereq_weight_factors(
+        user_uid=user_uid,
+        topic_uids=[r.get("uid") for r in rows if r.get("uid")],
+        tenant_id=tenant_id,
+    )
 
     for r in rows:
         tuid = r["uid"]
@@ -149,17 +169,35 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
             continue
 
         mastered = float(progress.get(tuid, 0.0) or 0.0)
-        missing = 0
-        for pre in (r.get("prereqs") or []):
-            mastered_pre = float(progress.get(pre, 0.0) or 0.0)
-            if mastered_pre < 0.3:
-                missing += 1
+        prereq_edges = normalize_prereq_edges(r.get("prereqs") or [])
+        prereq_state = compute_topic_prereq_state(
+            topic_uid=tuid,
+            prereq_edges=prereq_edges,
+            progress=progress,
+            personal_factors=personal_factors,
+            readiness_threshold=0.3,
+            hard_threshold=0.5,
+        )
+        missing = len(prereq_state["blocking_prereqs"]) + len(prereq_state["soft_missing_prereqs"])
         difficulty = float(r.get("difficulty_level", 5))
-        priority = max(0.0, (1.0 - mastered) + penalty_factor * missing)
+        priority = max(0.0, (1.0 - mastered) + penalty_factor * prereq_state["soft_gap"])
+        if prereq_state["hard_blocked"]:
+            priority += penalty_factor
         # Difficulty bonus for gifted/olympiad: prefer harder topics
         if is_advanced:
             priority += 0.1 * (difficulty / 10.0)
-        items.append({"uid": tuid, "title": r["title"], "mastered": mastered, "missing_prereqs": missing, "priority": priority, "difficulty_level": difficulty})
+        items.append(
+            {
+                "uid": tuid,
+                "title": r["title"],
+                "mastered": mastered,
+                "missing_prereqs": missing,
+                "priority": priority,
+                "difficulty_level": difficulty,
+                "readiness": prereq_state["readiness"],
+                "is_hard_blocked": prereq_state["hard_blocked"],
+            }
+        )
     try:
         s.close()
     except Exception:
@@ -207,8 +245,8 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
             more = s2.run(
                 "MATCH (t:Topic) WHERE ($tid IS NULL OR t.tenant_id = $tid) "
                 "AND (t)<-[:CONTAINS]-() "
-                "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-                "RETURN DISTINCT t.uid AS uid, t.title AS title, collect(DISTINCT pre.uid) AS prereqs, "
+                "OPTIONAL MATCH (t)-[pr:PREREQ]->(pre:Topic) "
+                "RETURN DISTINCT t.uid AS uid, t.title AS title, collect(DISTINCT {uid: pre.uid, weight: coalesce(pr.weight, 0.5), is_hard: coalesce(pr.is_hard, false)}) AS prereqs, "
                 "coalesce(t.difficulty_level, 5) AS difficulty_level",
                 {"tid": tenant_id}
             ).data()
@@ -224,16 +262,34 @@ def plan_route(subject_uid: str | None, progress: Dict[str, float], limit: int =
             if any(it["uid"] == tuid for it in items):
                 continue
             mastered = float(progress.get(tuid, 0.0) or 0.0)
-            missing = 0
-            for pre in (r.get("prereqs") or []):
-                mastered_pre = float(progress.get(pre, 0.0) or 0.0)
-                if mastered_pre < 0.3:
-                    missing += 1
+            prereq_edges = normalize_prereq_edges(r.get("prereqs") or [])
+            prereq_state = compute_topic_prereq_state(
+                topic_uid=tuid,
+                prereq_edges=prereq_edges,
+                progress=progress,
+                personal_factors=personal_factors,
+                readiness_threshold=0.3,
+                hard_threshold=0.5,
+            )
+            missing = len(prereq_state["blocking_prereqs"]) + len(prereq_state["soft_missing_prereqs"])
             difficulty = float(r.get("difficulty_level", 5))
-            priority = max(0.0, (1.0 - mastered) + penalty_factor * missing)
+            priority = max(0.0, (1.0 - mastered) + penalty_factor * prereq_state["soft_gap"])
+            if prereq_state["hard_blocked"]:
+                priority += penalty_factor
             if is_advanced:
                 priority += 0.1 * (difficulty / 10.0)
-            items.append({"uid": tuid, "title": r["title"], "mastered": mastered, "missing_prereqs": missing, "priority": priority, "difficulty_level": difficulty})
+            items.append(
+                {
+                    "uid": tuid,
+                    "title": r["title"],
+                    "mastered": mastered,
+                    "missing_prereqs": missing,
+                    "priority": priority,
+                    "difficulty_level": difficulty,
+                    "readiness": prereq_state["readiness"],
+                    "is_hard_blocked": prereq_state["hard_blocked"],
+                }
+            )
         items.sort(key=lambda x: x["priority"], reverse=True)
         if items and len(items) >= effective_limit:
             return items[:select_count]
