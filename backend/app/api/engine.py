@@ -39,6 +39,72 @@ router = APIRouter()
 _ROADMAP_CACHE_TTL_SECONDS = 900
 
 
+def _derive_statement_from_blob(blob_text: str, fallback_title: str = "") -> str:
+    """Extract a clean task statement from a KB description blob."""
+    raw = str(blob_text or "").strip()
+    if not raw:
+        return str(fallback_title or "").strip()
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln and ln.strip()]
+    if not lines:
+        return str(fallback_title or "").strip()
+
+    # Prefer explicit task line.
+    for ln in lines:
+        if re.match(r"^\s*задача\s*:", ln, flags=re.IGNORECASE):
+            candidate = ln
+            break
+    else:
+        # Skip obvious non-statement lines.
+        candidate = ""
+        for ln in lines:
+            if re.match(r"^\s*шаг\s*\d+\s*:", ln, flags=re.IGNORECASE):
+                continue
+            if re.match(r"^\s*ответ\s*:", ln, flags=re.IGNORECASE):
+                continue
+            if re.match(r"^\s*решение\s*:", ln, flags=re.IGNORECASE):
+                continue
+            if re.match(r"^\s*источник\s*:", ln, flags=re.IGNORECASE):
+                continue
+            candidate = ln
+            break
+
+    candidate = candidate or str(fallback_title or "").strip()
+    if not candidate:
+        return ""
+
+    # If answer/steps leaked into the same line, trim tail.
+    candidate = re.split(r"\bшаг\s*1\s*:", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    candidate = re.split(r"\bответ\s*:", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    return candidate.rstrip(".").strip()
+
+
+def _normalize_method_examples_for_client(examples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure example.statement contains only the question stem."""
+    normalized: list[dict[str, Any]] = []
+    for ex in examples:
+        row = dict(ex or {})
+        title = str(row.get("title") or "").strip()
+        statement_raw = str(row.get("statement") or "").strip()
+        solution_raw = str(row.get("solution") or "").strip()
+
+        statement_looks_like_solution = bool(
+            re.search(r"\bшаг\s*\d+\s*:", statement_raw, flags=re.IGNORECASE)
+            or re.search(r"\bответ\s*:", statement_raw, flags=re.IGNORECASE)
+        )
+
+        if not statement_raw or statement_looks_like_solution:
+            statement_raw = _derive_statement_from_blob(solution_raw or statement_raw, title)
+
+        if not solution_raw:
+            solution_raw = str(row.get("statement") or "").strip()
+
+        row["statement"] = statement_raw or title
+        row["solution"] = solution_raw or statement_raw or title
+        normalized.append(row)
+    return normalized
+
+
 def _request_scope(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
@@ -168,9 +234,11 @@ async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
                 m.user_class_min AS user_class_min,
                 m.user_class_max AS user_class_max,
                 m.method_role    AS method_role,
-                m.viz_type       AS viz_type,
+                coalesce(m.viz_type, m.visualization_type) AS viz_type,
                 m.visualization  AS visualization,
                 m.viz_params     AS viz_params,
+                m.key_formula    AS key_formula,
+                m.answer_type    AS answer_type,
                 sk.uid           AS skill_uid,
                 sk.title         AS skill_title,
                 t.uid            AS topic_uid,
@@ -178,12 +246,15 @@ async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
                 collect(DISTINCT {
                     uid: ex.uid, title: ex.title,
                     statement: coalesce(ex.statement, ex.description), solution: coalesce(ex.solution, ex.description),
-                    difficulty: ex.difficulty_level,
+                    difficulty: coalesce(ex.difficulty, ex.difficulty_level),
                     user_class_min: ex.user_class_min,
                     user_class_max: ex.user_class_max,
                     viz_type: ex.viz_type,
                     visualization: ex.visualization,
-                    viz_params: ex.viz_params
+                    viz_params: ex.viz_params,
+                    hints: ex.hints,
+                    answer_type: ex.answer_type,
+                    solution_steps: ex.solution_steps
                 }) AS method_examples
             """,
             {"uid": method_uid, "user_class": user_class},
@@ -197,6 +268,7 @@ async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
     r = rows[0]
 
     examples = [e for e in (r.get("method_examples") or []) if e.get("uid")]
+    examples = _normalize_method_examples_for_client(examples)
 
     return {
         "items": [{
@@ -211,6 +283,8 @@ async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
             "viz_type":       r.get("viz_type"),
             "visualization":  r.get("visualization"),
             "viz_params":     r.get("viz_params"),
+            "key_formula":    r.get("key_formula"),
+            "answer_type":    r.get("answer_type"),
             "skill_uid":      r.get("skill_uid") or "",
             "skill_title":    r.get("skill_title") or "",
             "topic_uid":      r.get("topic_uid") or "",
