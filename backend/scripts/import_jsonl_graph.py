@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 TENANT_ID = "default"
 BATCH_SIZE = 200
+WIPE_BATCH_SIZE = 500
 
 # Default JSONL location: sibling of scripts/, inside app/services/kb/
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -75,12 +76,32 @@ def _load_jsonl(path: Path) -> list[dict]:
 
 
 def _wipe_tenant(session, tenant_id: str) -> int:
-    result = session.run(
-        "MATCH (n {tenant_id: $tid}) DETACH DELETE n RETURN count(n) AS deleted",
-        tid=tenant_id,
-    )
-    row = result.single()
-    return int(row["deleted"]) if row else 0
+    deleted_total = 0
+
+    def _delete_batch(tx):
+        result = tx.run(
+            """
+            MATCH (n {tenant_id: $tid})
+            WITH n LIMIT $limit
+            DETACH DELETE n
+            RETURN count(n) AS deleted
+            """,
+            tid=tenant_id,
+            limit=WIPE_BATCH_SIZE,
+        )
+        row = result.single()
+        return int(row["deleted"]) if row else 0
+
+    while True:
+        deleted = session.execute_write(_delete_batch)
+        if deleted == 0:
+            break
+        deleted_total += deleted
+        print(f"    deleted nodes: {deleted_total}", end="\r")
+
+    if deleted_total:
+        print()
+    return deleted_total
 
 
 def _import_entities(session, entities: list[dict], tenant_id: str) -> int:

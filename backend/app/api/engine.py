@@ -91,6 +91,7 @@ def _normalize_method_examples_for_client(examples: list[dict[str, Any]]) -> lis
         statement_looks_like_solution = bool(
             re.search(r"\bшаг\s*\d+\s*:", statement_raw, flags=re.IGNORECASE)
             or re.search(r"\bответ\s*:", statement_raw, flags=re.IGNORECASE)
+            or re.search(r"\bрешение\s*:", statement_raw, flags=re.IGNORECASE)
         )
 
         if not statement_raw or statement_looks_like_solution:
@@ -246,6 +247,7 @@ async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
                 collect(DISTINCT {
                     uid: ex.uid, title: ex.title,
                     statement: coalesce(ex.statement, ex.description), solution: coalesce(ex.solution, ex.description),
+                    answer: coalesce(ex.answer, ex.correct_answer),
                     difficulty: coalesce(ex.difficulty, ex.difficulty_level),
                     user_class_min: ex.user_class_min,
                     user_class_max: ex.user_class_max,
@@ -1093,25 +1095,20 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
     # Curriculum Filter Preparation
     allowed_topics: Optional[Set[str]] = None
     curriculum_root_nodes: List[str] = []
+    curriculum_node_meta_by_uid: Dict[str, Dict] = {}
     if payload.curriculum_code:
         cv = get_graph_view(payload.curriculum_code)
         if cv.get("ok") and cv.get("nodes"):
+             curriculum_node_meta_by_uid = {
+                 n["canonical_uid"]: n
+                 for n in cv["nodes"]
+                 if n.get("canonical_uid")
+             }
              curriculum_root_nodes = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
              if curriculum_root_nodes:
-                 repo_cv = Neo4jRepo()
-                 try:
-                     res_cv = repo_cv.read(
-                        "UNWIND $roots AS root MATCH (t:Topic {uid:root})-[:PREREQ*0..]->(p:Topic) RETURN collect(DISTINCT p.uid) AS uids",
-                        {"roots": curriculum_root_nodes}
-                     )
-                     if res_cv and res_cv[0].get("uids"):
-                         allowed_topics = set(res_cv[0]["uids"])
-                     else:
-                         allowed_topics = set()
-                 except Exception:
-                     allowed_topics = set()
-                 finally:
-                     repo_cv.close()
+                 # Exam curricula must be a hard boundary: return only explicitly
+                 # seeded curriculum_nodes, not their PREREQ closure.
+                 allowed_topics = set(curriculum_root_nodes)
         
         if allowed_topics is None:
              # Curriculum code provided but invalid or not found -> block all
@@ -1283,6 +1280,62 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
             repo.close()
         except Exception:
             ...
+    if payload.curriculum_code and curriculum_root_nodes:
+        # The curriculum table is the source of truth for exam topic pools.
+        # Keep the seeded order, append stubs for graph-missing roots, and drop
+        # any prerequisite/subject traversal noise.
+        by_uid: Dict[str, Dict] = {}
+        for topic in topics:
+            uid = str(topic.get("topic_uid") or "").strip()
+            if uid and uid not in by_uid:
+                meta = curriculum_node_meta_by_uid.get(uid, {})
+                by_uid[uid] = {
+                    **topic,
+                    "order_index": meta.get("order_index", topic.get("order_index")),
+                    "exam_task_number": meta.get(
+                        "exam_task_number",
+                        topic.get("exam_task_number"),
+                    ),
+                }
+
+        missing_uids = [uid for uid in curriculum_root_nodes if uid and uid not in by_uid]
+        missing_titles: Dict[str, str] = {}
+        if missing_uids:
+            try:
+                repo = Neo4jRepo()
+                rows = repo.read(
+                    "UNWIND $uids AS uid OPTIONAL MATCH (t:Topic {uid:uid}) RETURN uid, t.title AS title",
+                    {"uids": missing_uids},
+                )
+                missing_titles = {
+                    str(r.get("uid")): str(r.get("title") or r.get("uid"))
+                    for r in rows or []
+                    if r.get("uid")
+                }
+                repo.close()
+            except Exception:
+                missing_titles = {}
+
+        ordered_topics: List[Dict] = []
+        for uid in curriculum_root_nodes:
+            if not uid:
+                continue
+            ordered_topics.append(
+                by_uid.get(uid)
+                or {
+                    "topic_uid": uid,
+                    "title": missing_titles.get(uid) or uid,
+                    "user_class_min": None,
+                    "user_class_max": None,
+                    "difficulty_band": "standard",
+                    "prereq_topic_uids": [],
+                    "subsection_uid": None,
+                    "subsection_title": None,
+                    "order_index": curriculum_node_meta_by_uid.get(uid, {}).get("order_index"),
+                    "exam_task_number": curriculum_node_meta_by_uid.get(uid, {}).get("exam_task_number"),
+                }
+            )
+        topics = ordered_topics
     return {"items": topics, "meta": {"subject_uid": su or payload.subject_uid, "resolved_user_class": resolved}}
 
 # --- Adaptive Questions ---
@@ -2213,8 +2266,11 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         raise HTTPException(status_code=503, detail="Unable to generate question at this time.")
 
 
-async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: int, exclude_uids: set = set(), previous_prompts: List[str] = []) -> Dict:
-    qs = select_examples_for_topics([topic_uid], limit=1, difficulty_min=difficulty_min, difficulty_max=difficulty_max, exclude_uids=exclude_uids)
+async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: int, exclude_uids: set = set(), previous_prompts: List[str] = [], method_role: str | None = None) -> Dict:
+    qs = select_examples_for_topics([topic_uid], limit=1, difficulty_min=difficulty_min, difficulty_max=difficulty_max, exclude_uids=exclude_uids, method_role=method_role)
+    # Fallback: if method_role filter returned nothing, retry without it
+    if not qs and method_role:
+        qs = select_examples_for_topics([topic_uid], limit=1, difficulty_min=difficulty_min, difficulty_max=difficulty_max, exclude_uids=exclude_uids)
     
     if qs:
         q = qs[0]
@@ -2338,7 +2394,7 @@ async def start(payload: StartRequest, request: Request) -> Dict:
             raise HTTPException(status_code=404, detail="Topic not available")
         import uuid
         sid = uuid.uuid4().hex
-        first_q = await _select_question(payload.topic_uid, 3, 3, set())
+        first_q = await _select_question(payload.topic_uid, 2, 2, set(), method_role="exam")
         # Ensure subject_uid is populated in the question response
         first_q["subject_uid"] = payload.subject_uid
 
@@ -2372,6 +2428,8 @@ async def start(payload: StartRequest, request: Request) -> Dict:
             topic_pool.remove(payload.topic_uid)
         _random.shuffle(topic_pool)
 
+        # Number of questions = number of topics in curriculum (1 per topic)
+        total_topics = len(topic_pool) + 1  # +1 for the first topic already used
         sess_data = {
             "subject_uid": payload.subject_uid,
             "topic_uid": payload.topic_uid,
@@ -2383,15 +2441,15 @@ async def start(payload: StartRequest, request: Request) -> Dict:
             "last_question_uid": first_q["question_uid"],
             "good": 0,
             "bad": 0,
-            "min_questions": 7,
-            "max_questions": 20,
+            "min_questions": min(7, total_topics),
+            "max_questions": total_topics,
             "target_confidence": 0.85,
             "stability_window": 4,
             "d_history": [],
             "topic_uids_pool": topic_pool,
             "topic_uids_ptr": 0,
             "questions_per_topic": {payload.topic_uid: 1},
-            "max_questions_per_topic": 2,
+            "max_questions_per_topic": 1,
             "question_details": {
                 first_q["question_uid"]: {
                     "prompt": first_q["prompt"][:120],
@@ -2409,7 +2467,7 @@ async def start(payload: StartRequest, request: Request) -> Dict:
             track_event("kb_assessment_started", {"session_id": sid, "subject_uid": payload.subject_uid, "topic_uid": payload.topic_uid})
         except Exception:
             pass
-        return {"items": [first_q], "meta": {"assessment_session_id": sid}}
+        return {"items": [first_q], "meta": {"assessment_session_id": sid, "total_topics": total_topics}}
     except HTTPException:
         raise
     except Exception as e:
@@ -2707,16 +2765,8 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
     if len(sess["asked"]) >= sess["max_questions"]:
         return None
 
-    if difficulty_hint is not None:
-        d = max(1, min(10, difficulty_hint))
-    else:
-        # Standalone fallback (no API hint): simple ±1 from last d
-        d_last = sess["d_history"][-1] if sess["d_history"] else 3
-        last_q_uid = sess["asked"][-1] if sess["asked"] else None
-        last_score = 0.0
-        if last_q_uid and "question_details" in sess and last_q_uid in sess["question_details"]:
-            last_score = sess["question_details"][last_q_uid].get("score", 0.0)
-        d = min(10, d_last + 1) if last_score >= 0.5 else max(1, d_last - 1)
+    # Fixed difficulty = 2 for exam diagnostic (medium, method_role=exam examples)
+    d = 2
 
     sess["d_history"].append(d)
 
@@ -2756,6 +2806,7 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
                 max_d,
                 local_blocked,
                 previous_prompts=previous_prompts,
+                method_role="exam",
             )
             if not candidate:
                 return None
@@ -2771,9 +2822,9 @@ async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> O
         q = await _select_non_duplicate(d, d, asked_uids)
     except Exception as e:
         logger.warning("question_selection_error", error=str(e))
-        # Try fallback to standard difficulty if specific difficulty fails
+        # Try fallback to broader difficulty range if exact difficulty fails
         try:
-            q = await _select_non_duplicate(3, 3, asked_uids)
+            q = await _select_non_duplicate(1, 3, asked_uids)
         except Exception:
             q = None
 

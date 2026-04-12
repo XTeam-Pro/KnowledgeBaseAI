@@ -49,19 +49,31 @@ def select_examples_for_topics(
     difficulty_max: int = 5,
     exclude_uids: Set[str] | None = None,
     tenant_id: str | None = None,
+    method_role: str | None = None,
 ):
     exclude = exclude_uids or set()
     pool: List[Dict] = []
     if settings.neo4j_uri and settings.neo4j_user and settings.neo4j_password.get_secret_value():
         try:
             repo = Neo4jRepo()
+            # When method_role is specified, filter Method nodes by that role
+            if method_role:
+                method_match = (
+                    "OPTIONAL MATCH (t)-[:REQUIRES_SKILL]->(:Skill)-[:HAS_METHOD]->(m:Method)"
+                    "-[:HAS_EXAMPLE]->(ex2:Example) WHERE m.method_role = $mrole "
+                )
+            else:
+                method_match = (
+                    "OPTIONAL MATCH (t)-[:REQUIRES_SKILL]->(:Skill)-[:HAS_METHOD]->(:Method)"
+                    "-[:HAS_EXAMPLE]->(ex2:Example) "
+                )
             rows = repo.read(
                 (
                     "UNWIND $t AS tuid "
                     "MATCH (t:Topic {uid:tuid}) "
                     "WHERE ($tid IS NULL OR t.tenant_id = $tid) "
                     "OPTIONAL MATCH (t)-[:HAS_EXAMPLE]->(ex1:Example) "
-                    "OPTIONAL MATCH (t)-[:REQUIRES_SKILL]->(:Skill)-[:HAS_METHOD]->(:Method)-[:HAS_EXAMPLE]->(ex2:Example) "
+                    + method_match +
                     "OPTIONAL MATCH (t)-[:HAS_QUESTION|CONTAINS]->(q:Question) "
                     "WITH t, "
                     "     collect(DISTINCT ex1) + collect(DISTINCT ex2) AS examples, "
@@ -87,7 +99,7 @@ def select_examples_for_topics(
                     "       row.is_visual AS is_visual, row.visualization AS visualization, "
                     "       row.correct_answer AS correct_answer"
                 ),
-                {"t": topic_uids, "tid": tenant_id}
+                {"t": topic_uids, "tid": tenant_id, "mrole": method_role}
             )
             def _norm(x):
                 try:
