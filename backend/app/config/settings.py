@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     pg_dsn: PostgresDsn | str = Field(default="", alias="PG_DSN", validation_alias="PG_DSN")
 
     openai_api_key: SecretStr = Field(default=SecretStr(""), alias="OPENAI_API_KEY")
+    open_router_api_key: SecretStr = Field(default=SecretStr(""), alias="OPEN_ROUTER_API_KEY")
+    llm_provider: str = Field(default="openrouter", alias="LLM_PROVIDER")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+    openrouter_default_model: str = Field(default="openai/gpt-4o-mini", alias="OPENROUTER_DEFAULT_MODEL")
+    openrouter_http_proxy: str = Field(default="", alias="OPENROUTER_HTTP_PROXY")
     gigachat_credentials: str = Field(default="", alias="GIGACHAT_CREDENTIALS")
     fast_model: str = Field(default="gpt-4o-mini", alias="FAST_MODEL")
     lesson_model: str = Field(default="gpt-4o-mini", alias="LESSON_MODEL")

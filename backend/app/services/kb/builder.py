@@ -13,7 +13,7 @@ _MAX_TOKENS_CAP: int = 650
 _FAST_MODEL: str = settings.fast_model
 
 # Models that do not support custom temperature (only default=1 allowed)
-_NO_TEMPERATURE_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+_NO_TEMPERATURE_PREFIXES = ("o1", "o3", "o4")
 
 
 def _supports_temperature(model: str) -> bool:
@@ -28,8 +28,27 @@ def _get_openai_client():
     global _openai_client
     if _openai_client is None:
         from openai import AsyncOpenAI
-        api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else ""
-        _openai_client = AsyncOpenAI(api_key=api_key, max_retries=0, timeout=20.0)
+        import httpx
+        
+        provider = settings.llm_provider.lower()
+        if provider == "openrouter":
+            api_key = settings.open_router_api_key.get_secret_value() if settings.open_router_api_key else ""
+            base_url = settings.openrouter_base_url
+            # Configure HTTP proxy if specified (useful for geo-restrictions)
+            proxy_url = settings.openrouter_http_proxy
+            http_client = httpx.AsyncClient(proxy=proxy_url) if proxy_url else None
+        else:
+            api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else ""
+            base_url = None
+            http_client = None
+        
+        _openai_client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=0,
+            timeout=20.0,
+            http_client=http_client,
+        )
     return _openai_client
 
 
@@ -69,9 +88,14 @@ async def openai_chat_async(
       {"ok": True, "content": "..."} on success
       {"ok": False, "error": "..."} on failure
     """
-    api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else ""
+    provider = settings.llm_provider.lower()
+    if provider == "openrouter":
+        api_key = settings.open_router_api_key.get_secret_value() if settings.open_router_api_key else ""
+    else:
+        api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else ""
+    
     if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY is not configured"}
+        return {"ok": False, "error": "LLM API key is not configured (set OPEN_ROUTER_API_KEY or OPENAI_API_KEY)"}
 
     global _RATE_LIMIT_COOLDOWN_UNTIL
     now = time.monotonic()
@@ -84,7 +108,12 @@ async def openai_chat_async(
 
     try:
         client = _get_openai_client()
-        model_to_use = model or _FAST_MODEL
+        # Use OpenRouter default model when provider is openrouter
+        provider = settings.llm_provider.lower()
+        if provider == "openrouter" and not model:
+            model_to_use = settings.openrouter_default_model or _FAST_MODEL
+        else:
+            model_to_use = model or _FAST_MODEL
         max_tokens_to_use = int(max_tokens or kwargs.pop("max_tokens", _DEFAULT_MAX_TOKENS))
         max_tokens_to_use = max(1, min(max_tokens_to_use, _MAX_TOKENS_CAP))
         call_kwargs: dict[str, Any] = {"max_completion_tokens": max_tokens_to_use, **kwargs}
