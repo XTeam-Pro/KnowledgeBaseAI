@@ -1756,6 +1756,125 @@ def _try_eval_function_at_point(question_text: str) -> float | None:
         return None
 
 
+def _try_eval_latex_frac_at_point(question_text: str) -> float | None:
+    r"""Evaluate LaTeX \frac{numerator}{denominator} expressions at a given x.
+
+    Detects patterns like '\frac{2x + 3}{x - 1} при x = 2' and computes
+    the numeric result.  Handles nested expressions with basic arithmetic.
+    """
+    import math as _math
+
+    text = (question_text or "")
+    # Find variable assignment
+    m_assign = re.search(r"\bx\s*=\s*([-+]?\d+(?:[.,]\d+)?)\b", text)
+    if not m_assign:
+        return None
+    try:
+        x_val = float(m_assign.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+    # Find \frac{...}{...} — supports one level of nesting
+    m_frac = re.search(
+        r"\\frac\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}",
+        text,
+    )
+    if not m_frac:
+        return None
+
+    def _latex_expr_to_python(expr: str) -> str:
+        """Convert a simple LaTeX math expression to Python-evaluable string."""
+        s = expr.strip()
+        # Convert LaTeX sqrt
+        s = re.sub(r"\\sqrt\{([^{}]+)\}", r"_math.sqrt(\1)", s)
+        # Convert LaTeX cdot / times to *
+        s = re.sub(r"\\(?:cdot|times)", "*", s)
+        # Convert ^ to **
+        s = s.replace("^", "**")
+        # Insert implicit multiplication: 2x -> 2*x, 3(x+1) -> 3*(x+1)
+        s = re.sub(r"(\d)([x(])", r"\1*\2", s)
+        return s
+
+    try:
+        num_expr = _latex_expr_to_python(m_frac.group(1))
+        den_expr = _latex_expr_to_python(m_frac.group(2))
+        allowed = {"x": x_val, "_math": _math, "abs": abs}
+        num_val = eval(num_expr, {"__builtins__": {}}, allowed)  # noqa: S307
+        den_val = eval(den_expr, {"__builtins__": {}}, allowed)  # noqa: S307
+        if den_val == 0:
+            return None
+        return float(num_val) / float(den_val)
+    except Exception:
+        return None
+
+
+def _try_verify_triangle_cosine_rule(question_text: str) -> float | None:
+    """Verify triangle side calculations using the law of cosines.
+
+    Detects patterns like 'AB = 5, AC = 7, угол A = 60°, найдите BC'
+    and computes BC = sqrt(AB² + AC² - 2·AB·AC·cos(A)).
+    Returns the expected numeric answer or None if not a triangle problem.
+    """
+    import math as _math
+
+    text = (question_text or "")
+
+    # Must mention triangle
+    if not re.search(r"треугольн|triangle", text, re.IGNORECASE):
+        return None
+
+    # Extract two known sides
+    sides: dict[str, float] = {}
+    for m in re.finditer(
+        r"([A-Z]{2})\s*=\s*([-+]?\d+(?:[.,]\d+)?)\s*(?:см|м|mm|cm|m)?\b", text
+    ):
+        sides[m.group(1)] = float(m.group(2).replace(",", "."))
+
+    if len(sides) < 2:
+        return None
+
+    # Extract angle (in degrees)
+    angle_val = None
+    # Pattern: "угол A = 60°" or "угол A равен 60°" or "∠A = 60"
+    m_angle = re.search(
+        r"(?:угол|∠)\s*[A-Z]\s*(?:=|равен|равна)\s*([-+]?\d+(?:[.,]\d+)?)\s*°?",
+        text,
+        re.IGNORECASE,
+    )
+    if m_angle:
+        angle_val = float(m_angle.group(1).replace(",", "."))
+
+    if angle_val is None:
+        return None
+
+    # Extract which side to find: "Найдите BC" or "длину стороны BC"
+    m_find = re.search(
+        r"(?:найд|вычисл|определ|длин\w*\s+сторон\w*)\s+([A-Z]{2})",
+        text,
+        re.IGNORECASE,
+    )
+    if not m_find:
+        return None
+
+    target_side = m_find.group(1)
+
+    # We need two sides that are NOT the target
+    known_sides = {k: v for k, v in sides.items() if k != target_side}
+    if len(known_sides) < 2:
+        return None
+
+    side_values = list(known_sides.values())
+    a, b = side_values[0], side_values[1]
+    angle_rad = _math.radians(angle_val)
+
+    # Law of cosines: c² = a² + b² - 2ab·cos(C)
+    c_sq = a * a + b * b - 2 * a * b * _math.cos(angle_rad)
+    if c_sq < 0:
+        return None
+
+    return _math.sqrt(c_sq)
+
+
 async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: bool = False, previous_prompts: List[str] = [], difficulty: int = 5) -> Dict:
     # 0. Cache check — skips Neo4j + LLM for 60-70% of requests
     cached = await _q_cache_get(topic_uid, difficulty, exclude_uids)
@@ -1962,7 +2081,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 temperature=0.35,
                 model=settings.lesson_model,
                 feature="assessment_question_generate",
-                max_tokens=520,
+                max_tokens=1024,
                 response_format={"type": "json_object"},
             )
             if not res.get("ok"):
@@ -2076,6 +2195,98 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                                             expected=expected,
                                             fixed_to=best.get("text"),
                                         )
+                        except (ValueError, TypeError):
+                            pass
+
+            # Check 5: LaTeX \frac{}{} expression evaluation at a given x.
+            if data.get("options") or data.get("correct_value"):
+                frac_expected = _try_eval_latex_frac_at_point(prompt_gen)
+                if frac_expected is not None:
+                    if q_type == "single_choice" and data.get("options"):
+                        correct_opts = [o for o in data["options"] if o.get("is_correct")]
+                        if correct_opts:
+                            try:
+                                marked = float(str(correct_opts[0].get("text", "")).strip().replace(",", "."))
+                                if abs(marked - frac_expected) >= 1e-6:
+                                    if attempt < 1:
+                                        correction_requests.append(
+                                            f"Math error: \\frac expression at given x evaluates to "
+                                            f"{frac_expected:g}, but correct option is '{correct_opts[0].get('text')}'. "
+                                            "Recalculate and fix."
+                                        )
+                                    else:
+                                        for opt in data["options"]:
+                                            try:
+                                                v = float(str(opt.get("text", "")).strip().replace(",", "."))
+                                                if abs(v - frac_expected) < 1e-6:
+                                                    for o2 in data["options"]:
+                                                        o2["is_correct"] = (o2 is opt)
+                                                    logger.warning("llm_frac_correction_forced", expected=frac_expected)
+                                                    break
+                                            except (ValueError, TypeError):
+                                                pass
+                            except (ValueError, TypeError):
+                                pass
+                    elif q_type in ("numeric", "free_text") and data.get("correct_value") is not None:
+                        try:
+                            cv_num = float(str(data["correct_value"]).strip().replace(",", "."))
+                            if abs(cv_num - frac_expected) >= 1e-6:
+                                if attempt < 1:
+                                    correction_requests.append(
+                                        f"Math error: expression evaluates to {frac_expected:g}, "
+                                        f"but correct_value is '{data['correct_value']}'. Fix it."
+                                    )
+                                else:
+                                    data["correct_value"] = str(round(frac_expected, 6) if frac_expected != int(frac_expected) else int(frac_expected))
+                                    logger.warning("llm_frac_cv_forced", expected=frac_expected)
+                        except (ValueError, TypeError):
+                            pass
+
+            # Check 6: Triangle law of cosines verification.
+            if data.get("options") or data.get("correct_value"):
+                tri_expected = _try_verify_triangle_cosine_rule(prompt_gen)
+                if tri_expected is not None:
+                    # Format expected: prefer exact sqrt if it's irrational
+                    import math as _m6
+                    tri_sq = round(tri_expected ** 2)
+                    tri_is_integer = abs(tri_expected - round(tri_expected)) < 1e-9
+                    tri_display = str(round(tri_expected)) if tri_is_integer else f"√{tri_sq}"
+
+                    if q_type == "single_choice" and data.get("options"):
+                        correct_opts = [o for o in data["options"] if o.get("is_correct")]
+                        if correct_opts:
+                            try:
+                                marked_text = str(correct_opts[0].get("text", "")).strip()
+                                # Try numeric comparison
+                                marked_val = float(marked_text.replace(",", "."))
+                                if abs(marked_val - tri_expected) >= 0.01:
+                                    if attempt < 1:
+                                        correction_requests.append(
+                                            f"Geometry error: by the law of cosines the side = {tri_display} ≈ {tri_expected:.4f}, "
+                                            f"but correct option is '{marked_text}'. Recalculate step-by-step."
+                                        )
+                                    else:
+                                        logger.warning("llm_triangle_answer_wrong", expected=tri_display, got=marked_text)
+                            except (ValueError, TypeError):
+                                pass
+                    elif q_type in ("numeric", "free_text") and data.get("correct_value") is not None:
+                        try:
+                            cv_str = str(data["correct_value"]).strip()
+                            # Parse √N notation or plain number
+                            sqrt_m = re.match(r"[√√](\d+)", cv_str)
+                            if sqrt_m:
+                                cv_num = _m6.sqrt(float(sqrt_m.group(1)))
+                            else:
+                                cv_num = float(cv_str.replace(",", "."))
+                            if abs(cv_num - tri_expected) >= 0.01:
+                                if attempt < 1:
+                                    correction_requests.append(
+                                        f"Geometry error: law of cosines gives {tri_display} ≈ {tri_expected:.4f}, "
+                                        f"but correct_value is '{cv_str}'. Fix it."
+                                    )
+                                else:
+                                    data["correct_value"] = tri_display
+                                    logger.warning("llm_triangle_cv_forced", expected=tri_display)
                         except (ValueError, TypeError):
                             pass
 

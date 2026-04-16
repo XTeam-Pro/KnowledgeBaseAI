@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     openrouter_http_proxy: str = Field(default="", alias="OPENROUTER_HTTP_PROXY")
     gigachat_credentials: str = Field(default="", alias="GIGACHAT_CREDENTIALS")
     fast_model: str = Field(default="gpt-4o-mini", alias="FAST_MODEL")
-    lesson_model: str = Field(default="gpt-4o-mini", alias="LESSON_MODEL")
+    lesson_model: str = Field(default="google/gemini-2.5-flash", alias="LESSON_MODEL")
 
     neo4j_uri: str = Field(default="", alias="KB_NEO4J_URI")
     neo4j_user: str = Field(default="", alias="NEO4J_USER")
