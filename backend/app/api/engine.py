@@ -623,6 +623,48 @@ async def pathfind(payload: PathfindInput) -> Dict:
                 q.append(v)
     return {"target": payload.target_uid, "path": ordered}
 
+
+class PrereqEdgesInput(BaseModel):
+    uids: List[str] = Field(..., description="Topic UIDs to query PREREQ edges between.")
+
+
+class PrereqEdge(BaseModel):
+    from_uid: str
+    to_uid: str
+
+
+class PrereqEdgesResponse(BaseModel):
+    edges: List[PrereqEdge]
+
+
+@router.post(
+    "/prereq-edges",
+    summary="Get PREREQ edges strictly between the given topic UIDs",
+    response_model=PrereqEdgesResponse,
+)
+async def prereq_edges(payload: PrereqEdgesInput) -> Dict:
+    uids = [u.strip() for u in (payload.uids or []) if u and u.strip()]
+    if not uids:
+        return {"edges": []}
+    drv = get_driver()
+    try:
+        with drv.session() as s:
+            rows = s.run(
+                "MATCH (a:Topic)-[:PREREQ]->(b:Topic) "
+                "WHERE a.uid IN $uids AND b.uid IN $uids "
+                "RETURN DISTINCT a.uid AS from_uid, b.uid AS to_uid",
+                {"uids": uids},
+            )
+            edges = [
+                {"from_uid": r["from_uid"], "to_uid": r["to_uid"]}
+                for r in rows
+                if r.get("from_uid") and r.get("to_uid")
+            ]
+    finally:
+        drv.close()
+    return {"edges": edges}
+
+
 # --- Chat ---
 
 class ChatInput(BaseModel):
@@ -1496,6 +1538,7 @@ class StartRequest(BaseModel):
     goal_type: Optional[GoalType] = None
     curriculum_code: Optional[str] = None
     exam_type: Optional[ExamType] = None
+    topic_uids: Optional[List[str]] = None
 
 class OptionDTO(BaseModel):
     option_uid: str
@@ -1629,7 +1672,14 @@ def _topic_accessible(subject_uid: str, topic_uid: str, resolved_level: int, goa
 
 
 def _parse_llm_json_safely(content: str) -> dict:
-    """Parse LLM JSON with tolerance to invalid backslash escapes."""
+    """Parse LLM JSON tolerant к типичным огрехам моделей:
+
+    - обёртки ```json ... ``` или ``` ... ```;
+    - префикс/суффикс-проза вокруг JSON-объекта;
+    - невалидные backslash-escape (LaTeX: ``\\frac`` → json требует ``\\\\frac``);
+    - trailing comma перед ``}`` / ``]`` (частый у Gemini);
+    - одинарные кавычки вместо двойных.
+    """
     if not isinstance(content, str):
         raise ValueError("LLM content is not a string")
 
@@ -1640,28 +1690,87 @@ def _parse_llm_json_safely(content: str) -> dict:
         text = text.split("```", 1)[1].split("```", 1)[0]
     text = text.strip()
 
-    candidates = [text]
-
-    # Braces-only candidate if model wrapped with extra prose.
+    # Если модель обернула JSON в прозу — отрезаем по внешним фигурным скобкам.
     l = text.find("{")
     r = text.rfind("}")
     if l != -1 and r != -1 and r > l:
-        candidates.append(text[l : r + 1])
+        braced = text[l : r + 1]
+    else:
+        braced = text
 
-    for cand in candidates:
+    def _try(s: str) -> dict | None:
         try:
-            return json.loads(cand)
+            return json.loads(s)
         except json.JSONDecodeError:
-            # Fix invalid escapes like "\(" or "\q"
-            fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", cand)
-            if fixed != cand:
-                try:
-                    return json.loads(fixed)
-                except json.JSONDecodeError:
-                    pass
+            return None
+
+    for cand in (text, braced):
+        parsed = _try(cand)
+        if parsed is not None:
+            return parsed
+
+        # 1) Чиним невалидные escape: "\(" / "\q" / "\frac" → "\\(" / "\\q" / "\\frac".
+        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", cand)
+        # 2) Убираем trailing comma перед } или ].
+        fixed = re.sub(r",(\s*[}\]])", r"\1", fixed)
+        parsed = _try(fixed)
+        if parsed is not None:
+            return parsed
+
+        # 3) Экранируем control-characters внутри строковых литералов
+        #    (Gemini иногда переносит строку внутри "prompt": "...").
+        #    JSON не допускает сырые \n, \r, \t в строке — конвертируем их в \\n и т.д.
+        escaped = _escape_control_chars_in_strings(fixed)
+        if escaped != fixed:
+            parsed = _try(escaped)
+            if parsed is not None:
+                return parsed
+
+        # 4) Heuristic: одинарные кавычки при отсутствии двойных.
+        if '"' not in cand:
+            sq_to_dq = fixed.replace("'", '"')
+            parsed = _try(sq_to_dq)
+            if parsed is not None:
+                return parsed
 
     # Re-raise with original parser error for upstream retry logic
     return json.loads(text)
+
+
+def _escape_control_chars_in_strings(s: str) -> str:
+    """Заменяет сырые \n, \r, \t внутри "..."-литералов на \\n, \\r, \\t.
+
+    Идёт посимвольно, трекает состояние "внутри строки / снаружи",
+    учитывает backslash-escape. Это безопаснее, чем слепой replace,
+    т.к. не трогает переносы строк между ключами JSON.
+    """
+    out: list[str] = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if in_string:
+            if escape_next:
+                out.append(ch)
+                escape_next = False
+            elif ch == "\\":
+                out.append(ch)
+                escape_next = True
+            elif ch == '"':
+                out.append(ch)
+                in_string = False
+            elif ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            else:
+                out.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+    return "".join(out)
 
 
 def _is_rate_limited_llm_error(value: Any) -> bool:
@@ -1696,6 +1805,30 @@ def _q_difficulty_bucket(difficulty: int) -> int:
     return max(0, (difficulty - 1) // 3)
 
 
+# Визуальные отсылки, которые запрещены в текстовых (не-визуальных) вопросах.
+# Если Gemini сгенерировал "на рисунке изображён треугольник" при is_visual=false,
+# студент видит обман ("на рисунке", а рисунка нет). Используется и для проверки
+# кеша (старые отравленные вопросы) и при сохранении в кеш (не кладём отравленные).
+_VISUAL_REF_PATTERN = re.compile(
+    r"(?i)(на\s+)?(рисун|чертеж|схем)(к|ке|ка|е|а|ок)"
+    r"|(см\.|смотри)\s+рис"
+    r"|изображен(ы|о|а)?"
+    r"|shown\s+in\s+(the\s+)?figure"
+    r"|see\s+figure"
+)
+
+
+def _has_visual_reference(question: Dict) -> bool:
+    """Вопрос помечен is_visual=false, но текст ссылается на рисунок/график."""
+    if question.get("is_visual") or question.get("visualization"):
+        return False
+    text = " ".join(
+        str(question.get(k, "") or "")
+        for k in ("prompt", "text", "question_text", "statement")
+    )
+    return bool(_VISUAL_REF_PATTERN.search(text))
+
+
 async def _q_cache_get(topic_uid: str, difficulty: int, exclude_uids: set) -> Dict | None:
     """Return a cached question not already seen by this student, or None."""
     try:
@@ -1704,8 +1837,12 @@ async def _q_cache_get(topic_uid: str, difficulty: int, exclude_uids: set) -> Di
         items = await r.lrange(key, 0, -1)
         for item in items:
             q = json.loads(item)
-            if q.get("question_uid") not in exclude_uids:
-                return q
+            if q.get("question_uid") in exclude_uids:
+                continue
+            if _has_visual_reference(q):
+                # Отравленный кеш — пропускаем и регенерируем.
+                continue
+            return q
     except Exception:
         pass
     return None
@@ -1713,6 +1850,10 @@ async def _q_cache_get(topic_uid: str, difficulty: int, exclude_uids: set) -> Di
 
 async def _q_cache_store(topic_uid: str, difficulty: int, question: Dict) -> None:
     """Append a generated question to the Redis cache pool."""
+    if _has_visual_reference(question):
+        # Не сохраняем в кеш вопросы, в которых текст обещает рисунок,
+        # а визуализации нет — иначе следующие студенты увидят то же самое.
+        return
     try:
         r = _get_q_cache_client()
         key = f"q_cache:{topic_uid}:{_q_difficulty_bucket(difficulty)}"
@@ -2058,7 +2199,9 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     - single_choice: exactly 4 options, exactly 1 correct.
     - numeric: one numeric answer.
     - free_text: short answer.
-    - If visual=false, do not reference figures.
+    - If visual=false: the question MUST be purely textual. Do NOT write "на рисунке",
+      "на чертеже", "на схеме", "изображён/изображена/изображено", "см. рисунок", "как показано".
+      Do NOT reference any figures, drawings, diagrams, graphs, or images.
     - Coordinates mentioned in text must match visualization.
     - For quadratic with two roots, include both roots in the correct answer.
     - CRITICAL math rule: if the question asks to evaluate a function at a point (e.g. y = f(x) at x = a),
@@ -2081,7 +2224,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 temperature=0.35,
                 model=settings.lesson_model,
                 feature="assessment_question_generate",
-                max_tokens=1024,
+                max_tokens=2048,
                 response_format={"type": "json_object"},
             )
             if not res.get("ok"):
@@ -2566,6 +2709,9 @@ async def start(payload: StartRequest, request: Request) -> Dict:
         resolved = _resolve_level(uc)
 
         # Resolve topic_uid if missing (e.g. for Exam mode starting from first topic)
+        if not payload.topic_uid and payload.topic_uids:
+            payload.topic_uid = payload.topic_uids[0]
+
         if not payload.topic_uid:
             if payload.curriculum_code:
                 cv = get_graph_view(payload.curriculum_code)
@@ -2611,7 +2757,10 @@ async def start(payload: StartRequest, request: Request) -> Dict:
 
         # Build topic pool for multi-topic assessment (covers full curriculum/subject)
         topic_pool: list = []
-        if payload.curriculum_code:
+        if payload.topic_uids:
+            # Block diagnostic: use the explicit topic list
+            topic_pool = list(payload.topic_uids)
+        elif payload.curriculum_code:
             cv = get_graph_view(payload.curriculum_code)
             if not cv.get("ok") or not cv.get("nodes"):
                 raise HTTPException(
