@@ -31244,7 +31244,7 @@ Difficulty: -
 ---
 
 #### Topic: Теорема Пифагора
-`Topic UID`: `TOP-TEOREMA-PIFAGORA` | `Class range`: `8-8` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-TEOREMA-PIFAGORA` | `Class range`: `8-8` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Теорема Пифагора
 `UID`: `MET-INTRO-TEOREMA-PIFAGORA-20260328` | `learning_order`: `0` | `role`: `intro` | `grade`: `8` | `class_range`: `8-8` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
