@@ -30867,7 +30867,7 @@ Difficulty: сложный
 ---
 
 #### Topic: Решение треугольников: теоремы синусов и косинусов
-`Topic UID`: `TOP-RESHENIE-TREUGOLNIKOV` | `Class range`: `9-9` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-RESHENIE-TREUGOLNIKOV` | `Class range`: `9-9` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready2.o`
 
 ##### Метод: Введение в тему: Решение треугольников
 `UID`: `MET-INTRO-RESHENIE-TREUGOLNIKOV-20260328` | `learning_order`: `0` | `role`: `intro` | `grade`: `9` | `class_range`: `9-9` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
