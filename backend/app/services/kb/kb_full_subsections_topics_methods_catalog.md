@@ -31749,7 +31749,7 @@ Difficulty: сложный
 ---
 
 #### Topic: Треугольники: основные понятия и признаки равенства
-`Topic UID`: `TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO` | `Class range`: `7-7` | `Methods`: `9` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO` | `Class range`: `7-7` | `Methods`: `9` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Треугольники
 `UID`: `MET-INTRO-TREUGOLNIKI-DE676B` | `learning_order`: `0` | `role`: `intro` | `grade`: `7` | `class_range`: `7-7` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
