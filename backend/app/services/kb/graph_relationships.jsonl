@@ -3413,27 +3413,6 @@
 {"tenant_id": "default", "uid": "E-15460d705a12efc5", "from_uid": "SKL-TOCHKA-PRYAM-SEED", "to_uid": "MET-PL-DISTANCE", "type": "HAS_METHOD", "_from_uid": "SKL-TOCHKA-PRYAM-SEED", "_to_uid": "MET-PL-DISTANCE", "_type": "HAS_METHOD", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "confidence": 0.95, "kind": "curriculum"}
 {"tenant_id": "default", "uid": "E-798666a8e2585e48", "from_uid": "SKL-TOCHKA-PRYAM-SEED", "to_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "type": "HAS_METHOD", "_from_uid": "SKL-TOCHKA-PRYAM-SEED", "_to_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "_type": "HAS_METHOD", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "confidence": 0.95, "kind": "curriculum"}
 {"tenant_id": "default", "uid": "E-75324132d4995b15", "from_uid": "SKL-TOCHKA-PRYAM-SEED", "to_uid": "MET-PL-BASIC", "type": "HAS_METHOD", "_from_uid": "SKL-TOCHKA-PRYAM-SEED", "_to_uid": "MET-PL-BASIC", "_type": "HAS_METHOD", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "confidence": 0.95, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-6ea3b8a1ba443b97", "from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A-AUTO-20260326-1", "type": "HAS_EXAMPLE", "_from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "_to_uid": "EX-MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A-AUTO-20260326-1", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-c6c277e83bcf4d84", "from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A-AUTO-20260326-2", "type": "HAS_EXAMPLE", "_from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "_to_uid": "EX-MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A-AUTO-20260326-2", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-451785b0d3959a55", "from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A-AUTO-20260326-3", "type": "HAS_EXAMPLE", "_from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "_to_uid": "EX-MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A-AUTO-20260326-3", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-575db3c89f7e0acd", "from_uid": "MET-PL-BASIC", "to_uid": "EX-MET-PL-BASIC-AUTO-20260326-1", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-BASIC", "_to_uid": "EX-MET-PL-BASIC-AUTO-20260326-1", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-cb5fef69367798f7", "from_uid": "MET-PL-BASIC", "to_uid": "EX-MET-PL-BASIC-AUTO-20260326-2", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-BASIC", "_to_uid": "EX-MET-PL-BASIC-AUTO-20260326-2", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-1647e805e8a07012", "from_uid": "MET-PL-BASIC", "to_uid": "EX-MET-PL-BASIC-AUTO-20260326-3", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-BASIC", "_to_uid": "EX-MET-PL-BASIC-AUTO-20260326-3", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-04c7ec1c45cda518", "from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-MET-TP-AKSIOMY-AUTO-20260326-1", "type": "HAS_EXAMPLE", "_from_uid": "MET-TP-AKSIOMY", "_to_uid": "EX-MET-TP-AKSIOMY-AUTO-20260326-1", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-91935e213d9ae8f9", "from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-MET-TP-AKSIOMY-AUTO-20260326-2", "type": "HAS_EXAMPLE", "_from_uid": "MET-TP-AKSIOMY", "_to_uid": "EX-MET-TP-AKSIOMY-AUTO-20260326-2", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-cca8fc8be8827696", "from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-MET-TP-AKSIOMY-AUTO-20260326-3", "type": "HAS_EXAMPLE", "_from_uid": "MET-TP-AKSIOMY", "_to_uid": "EX-MET-TP-AKSIOMY-AUTO-20260326-3", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-6feb68b85c987a93", "from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-MET-TP-OTREZOK-LUCH-AUTO-20260326-1", "type": "HAS_EXAMPLE", "_from_uid": "MET-TP-OTREZOK-LUCH", "_to_uid": "EX-MET-TP-OTREZOK-LUCH-AUTO-20260326-1", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-19c34fa3a57a3dee", "from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-MET-TP-OTREZOK-LUCH-AUTO-20260326-2", "type": "HAS_EXAMPLE", "_from_uid": "MET-TP-OTREZOK-LUCH", "_to_uid": "EX-MET-TP-OTREZOK-LUCH-AUTO-20260326-2", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-01538c90e9517786", "from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-MET-TP-OTREZOK-LUCH-AUTO-20260326-3", "type": "HAS_EXAMPLE", "_from_uid": "MET-TP-OTREZOK-LUCH", "_to_uid": "EX-MET-TP-OTREZOK-LUCH-AUTO-20260326-3", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-e203f79ac9cf1e2a", "from_uid": "MET-PL-DISTANCE", "to_uid": "EX-MET-PL-DISTANCE-AUTO-20260326-1", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-DISTANCE", "_to_uid": "EX-MET-PL-DISTANCE-AUTO-20260326-1", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-454207f084633d84", "from_uid": "MET-PL-DISTANCE", "to_uid": "EX-MET-PL-DISTANCE-AUTO-20260326-2", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-DISTANCE", "_to_uid": "EX-MET-PL-DISTANCE-AUTO-20260326-2", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-c5cda2d73199521a", "from_uid": "MET-PL-DISTANCE", "to_uid": "EX-MET-PL-DISTANCE-AUTO-20260326-3", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-DISTANCE", "_to_uid": "EX-MET-PL-DISTANCE-AUTO-20260326-3", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-f1a7feabe389e01d", "from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MET-PL-MIDPOINT-AUTO-20260326-1", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-MIDPOINT", "_to_uid": "EX-MET-PL-MIDPOINT-AUTO-20260326-1", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-6be6175d4c02dd14", "from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MET-PL-MIDPOINT-AUTO-20260326-2", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-MIDPOINT", "_to_uid": "EX-MET-PL-MIDPOINT-AUTO-20260326-2", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-ac150422150ce785", "from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MET-PL-MIDPOINT-AUTO-20260326-3", "type": "HAS_EXAMPLE", "_from_uid": "MET-PL-MIDPOINT", "_to_uid": "EX-MET-PL-MIDPOINT-AUTO-20260326-3", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-4588d55deb0a9374", "from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328-AUTO-20260326-1", "type": "HAS_EXAMPLE", "_from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "_to_uid": "EX-MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328-AUTO-20260326-1", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-8f48e157454f30e3", "from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328-AUTO-20260326-2", "type": "HAS_EXAMPLE", "_from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "_to_uid": "EX-MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328-AUTO-20260326-2", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
-{"tenant_id": "default", "uid": "E-e3af937fab948e18", "from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328-AUTO-20260326-3", "type": "HAS_EXAMPLE", "_from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "_to_uid": "EX-MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328-AUTO-20260326-3", "_type": "HAS_EXAMPLE", "updated_at": "2026-03-28T19:09:31.388782+00:00", "weight": 1.0, "relevance": 1.0, "kind": "curriculum"}
 {"tenant_id": "default", "uid": "E-8ed7ec5e52928a78", "from_uid": "TOP-PLOSCHADI-c811e2", "to_uid": "TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO", "type": "PREREQ", "_from_uid": "TOP-PLOSCHADI-c811e2", "_to_uid": "TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO", "_type": "PREREQ", "updated_at": "2026-03-28T19:21:08.662296+00:00"}
 {"tenant_id": "default", "uid": "E-ad75e37a7fd2d80d", "from_uid": "TOP-PODOBIE-86fb4a", "to_uid": "TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO", "type": "PREREQ", "_from_uid": "TOP-PODOBIE-86fb4a", "_to_uid": "TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO", "_type": "PREREQ", "updated_at": "2026-03-28T19:21:08.662296+00:00"}
 {"tenant_id": "default", "uid": "E-97672322f7d1b79b", "from_uid": "TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO", "to_uid": "TOP-UGLY-9cbfc3", "type": "PREREQ", "_from_uid": "TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO", "_to_uid": "TOP-UGLY-9cbfc3", "_type": "PREREQ", "updated_at": "2026-03-28T19:21:08.662296+00:00"}
@@ -7022,3 +7001,68 @@
 {"tenant_id": "default", "uid": "E-88", "from_uid": "MET-EXAM-TREUG-PROOF-20260328", "to_uid": "EX-MET-EXAM-PROOF-5", "type": "HAS_EXAMPLE", "_from_uid": "MET-EXAM-TREUG-PROOF-20260328", "_to_uid": "EX-MET-EXAM-PROOF-5", "_type": "HAS_EXAMPLE", "updated_at": "2026-04-26T15:21:48.653350+00:00", "weight": 1.0, "confidence": 0.95, "kind": "curriculum"}
 {"tenant_id": "default", "uid": "E-89", "from_uid": "MET-EXAM-TREUG-PROOF-20260328", "to_uid": "EX-MET-EXAM-PROOF-6", "type": "HAS_EXAMPLE", "_from_uid": "MET-EXAM-TREUG-PROOF-20260328", "_to_uid": "EX-MET-EXAM-PROOF-6", "_type": "HAS_EXAMPLE", "updated_at": "2026-04-26T15:21:48.653350+00:00", "weight": 1.0, "confidence": 0.95, "kind": "curriculum"}
 {"tenant_id": "default", "uid": "E-8a", "from_uid": "MET-EXAM-TREUG-PROOF-20260328", "to_uid": "EX-MET-EXAM-PROOF-7", "type": "HAS_EXAMPLE", "_from_uid": "MET-EXAM-TREUG-PROOF-20260328", "_to_uid": "EX-MET-EXAM-PROOF-7", "_type": "HAS_EXAMPLE", "updated_at": "2026-04-26T15:21:48.653350+00:00", "weight": 1.0, "confidence": 0.95, "kind": "curriculum"}
+{"from_uid": "SKL-TOCHKA-PRYAM-SEED", "to_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "type": "HAS_METHOD"}
+{"from_uid": "SKL-TOCHKA-PRYAM-SEED", "to_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "type": "HAS_METHOD"}
+{"from_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "to_uid": "EX-EXAM-PRIN-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "to_uid": "EX-EXAM-PRIN-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "to_uid": "EX-EXAM-PRIN-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "to_uid": "EX-EXAM-PRIN-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "to_uid": "EX-EXAM-PRIN-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "to_uid": "EX-EXAM-PRIN-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-PRINADLEZHNOST-20260328", "to_uid": "EX-EXAM-PRIN-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "to_uid": "EX-EXAM-POSTR-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "to_uid": "EX-EXAM-POSTR-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "to_uid": "EX-EXAM-POSTR-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "to_uid": "EX-EXAM-POSTR-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "to_uid": "EX-EXAM-POSTR-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "to_uid": "EX-EXAM-POSTR-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-EXAM-TOCHKA-POSTROENIE-20260328", "to_uid": "EX-EXAM-POSTR-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-INTRO-TOCHKA-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-INTRO-TOCHKA-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-INTRO-TOCHKA-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-INTRO-TOCHKA-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-INTRO-TOCHKA-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-INTRO-TOCHKA-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A", "to_uid": "EX-INTRO-TOCHKA-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-BASIC", "to_uid": "EX-PLBASIC-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-BASIC", "to_uid": "EX-PLBASIC-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-BASIC", "to_uid": "EX-PLBASIC-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-BASIC", "to_uid": "EX-PLBASIC-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-BASIC", "to_uid": "EX-PLBASIC-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-BASIC", "to_uid": "EX-PLBASIC-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-BASIC", "to_uid": "EX-PLBASIC-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-AKSIOMY-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-AKSIOMY-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-AKSIOMY-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-AKSIOMY-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-AKSIOMY-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-AKSIOMY-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-AKSIOMY", "to_uid": "EX-AKSIOMY-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-OTR-LUCH-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-OTR-LUCH-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-OTR-LUCH-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-OTR-LUCH-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-OTR-LUCH-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-OTR-LUCH-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-TP-OTREZOK-LUCH", "to_uid": "EX-OTR-LUCH-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-DISTANCE", "to_uid": "EX-DIST-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-DISTANCE", "to_uid": "EX-DIST-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-DISTANCE", "to_uid": "EX-DIST-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-DISTANCE", "to_uid": "EX-DIST-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-DISTANCE", "to_uid": "EX-DIST-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-DISTANCE", "to_uid": "EX-DIST-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-DISTANCE", "to_uid": "EX-DIST-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MID-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MID-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MID-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MID-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MID-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MID-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PL-MIDPOINT", "to_uid": "EX-MID-7", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-PRACT-1", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-PRACT-2", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-PRACT-3", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-PRACT-4", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-PRACT-5", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-PRACT-6", "type": "HAS_EXAMPLE"}
+{"from_uid": "MET-PRACTICE-TOCHKA-I-PRYAMAYA-20260328", "to_uid": "EX-PRACT-7", "type": "HAS_EXAMPLE"}
