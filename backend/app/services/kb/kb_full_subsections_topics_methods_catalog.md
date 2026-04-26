@@ -31244,7 +31244,7 @@ Difficulty: -
 ---
 
 #### Topic: Теорема Пифагора
-`Topic UID`: `TOP-TEOREMA-PIFAGORA` | `Class range`: `8-8` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-TEOREMA-PIFAGORA` | `Class range`: `8-8` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Теорема Пифагора
 `UID`: `MET-INTRO-TEOREMA-PIFAGORA-20260328` | `learning_order`: `0` | `role`: `intro` | `grade`: `8` | `class_range`: `8-8` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
@@ -31470,7 +31470,7 @@ Difficulty: сложный
 ---
 
 #### Topic: Точка и прямая
-`Topic UID`: `TOP-TOCHKA-I-PRYAMAYA-291b4a` | `Class range`: `7-7` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-TOCHKA-I-PRYAMAYA-291b4a` | `Class range`: `7-7` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Точка и прямая
 `UID`: `MET-INTRO-TOCHKA-I-PRYAMAYA-291B4A` | `learning_order`: `0` | `role`: `intro` | `grade`: `7` | `class_range`: `7-7` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
@@ -31749,7 +31749,7 @@ Difficulty: сложный
 ---
 
 #### Topic: Треугольники: основные понятия и признаки равенства
-`Topic UID`: `TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO` | `Class range`: `7-7` | `Methods`: `9` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-TREUGOLNIKI-OSNOVY-RAVENSTVO` | `Class range`: `7-7` | `Methods`: `9` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Треугольники
 `UID`: `MET-INTRO-TREUGOLNIKI-DE676B` | `learning_order`: `0` | `role`: `intro` | `grade`: `7` | `class_range`: `7-7` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
