@@ -32455,7 +32455,7 @@ Difficulty: -
 ### Subsection: Пространственная геометрия
 
 #### Topic: Комбинации тел и принцип Кавальери
-`Topic UID`: `TOP-KOMBINATSII-TEL-I-PRINTSIP-KAVALERI-20260328` | `Class range`: `10-11` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-KOMBINATSII-TEL-I-PRINTSIP-KAVALERI-20260328` | `Class range`: `10-11` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Комбинации тел и принцип Кавальери
 `UID`: `MET-INTRO-KOMBINATSII-TEL-I-PRINTSIP-KAVALERI-20260328` | `learning_order`: `0` | `role`: `intro` | `grade`: `11` | `class_range`: `10-11` | `visualization`: `solid_figure` | `visualization_type`: `-` | `answer_type`: `-`
@@ -33002,7 +33002,7 @@ Difficulty: -
 ---
 
 #### Topic: Объёмы многогранников
-`Topic UID`: `TOP-OBYOMY-MNOGOGRANNIKOV-20260328` | `Class range`: `10-11` | `Methods`: `6` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-OBYOMY-MNOGOGRANNIKOV-20260328` | `Class range`: `10-11` | `Methods`: `6` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Объёмы многогранников
 `UID`: `MET-INTRO-OBYOMY-MNOGOGRANNIKOV-20260328` | `learning_order`: `0` | `role`: `intro` | `grade`: `10` | `class_range`: `10-11` | `visualization`: `solid_figure` | `visualization_type`: `-` | `answer_type`: `-`
@@ -33266,7 +33266,7 @@ Difficulty: сложный
 ---
 
 #### Topic: Объёмы тел вращения
-`Topic UID`: `TOP-OBYOMY-TEL-VRASCHENIYA-20260328` | `Class range`: `10-11` | `Methods`: `6` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-OBYOMY-TEL-VRASCHENIYA-20260328` | `Class range`: `10-11` | `Methods`: `6` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Объёмы тел вращения
 `UID`: `MET-INTRO-OBYOMY-TEL-VRASCHENIYA-20260328` | `learning_order`: `0` | `role`: `intro` | `grade`: `10` | `class_range`: `10-11` | `visualization`: `solid_figure` | `visualization_type`: `-` | `answer_type`: `-`
@@ -51859,7 +51859,7 @@ Difficulty: сложный
 ---
 
 #### Topic: Степенная функция
-`Topic UID`: `TOP-STEPENNAYA-FUNKCIYA-9-10` | `Class range`: `9-10` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-STEPENNAYA-FUNKCIYA-9-10` | `Class range`: `9-10` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Степенная функция
 `UID`: `MET-INTRO-STEPENNYE-FUNKTSII-9D2782` | `learning_order`: `0` | `role`: `intro` | `grade`: `9` | `class_range`: `9-10` | `visualization`: `function_graph` | `visualization_type`: `-` | `answer_type`: `-`
@@ -52343,7 +52343,7 @@ Difficulty: -
 ---
 
 #### Topic: Функция и ее свойства (анализ по графику)
-`Topic UID`: `TOP-8-FUNKCIYA-I-EE-SVOYSTVA` | `Class range`: `8-8` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-8-FUNKCIYA-I-EE-SVOYSTVA` | `Class range`: `8-8` | `Methods`: `7` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Анализ свойств функции по графику
 `UID`: `MET-INTRO-8-FUNKCIYA-I-EE-SVOYSTVA` | `learning_order`: `0` | `role`: `intro` | `grade`: `8` | `class_range`: `8-8` | `visualization`: `function_graph` | `visualization_type`: `-` | `answer_type`: `-`
