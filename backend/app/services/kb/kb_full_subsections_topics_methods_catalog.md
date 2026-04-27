@@ -30448,7 +30448,7 @@ Difficulty: средний
 ---
 
 #### Topic: Подобие
-`Topic UID`: `TOP-PODOBIE-86fb4a` | `Class range`: `8-9` | `Methods`: `10` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-PODOBIE-86fb4a` | `Class range`: `8-9` | `Methods`: `10` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Подобие
 `UID`: `MET-INTRO-PODOBIE-86FB4A` | `learning_order`: `0` | `role`: `intro` | `grade`: `8` | `class_range`: `8-9` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
