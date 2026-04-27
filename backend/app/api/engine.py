@@ -623,48 +623,6 @@ async def pathfind(payload: PathfindInput) -> Dict:
                 q.append(v)
     return {"target": payload.target_uid, "path": ordered}
 
-
-class PrereqEdgesInput(BaseModel):
-    uids: List[str] = Field(..., description="Topic UIDs to query PREREQ edges between.")
-
-
-class PrereqEdge(BaseModel):
-    from_uid: str
-    to_uid: str
-
-
-class PrereqEdgesResponse(BaseModel):
-    edges: List[PrereqEdge]
-
-
-@router.post(
-    "/prereq-edges",
-    summary="Get PREREQ edges strictly between the given topic UIDs",
-    response_model=PrereqEdgesResponse,
-)
-async def prereq_edges(payload: PrereqEdgesInput) -> Dict:
-    uids = [u.strip() for u in (payload.uids or []) if u and u.strip()]
-    if not uids:
-        return {"edges": []}
-    drv = get_driver()
-    try:
-        with drv.session() as s:
-            rows = s.run(
-                "MATCH (a:Topic)-[:PREREQ]->(b:Topic) "
-                "WHERE a.uid IN $uids AND b.uid IN $uids "
-                "RETURN DISTINCT a.uid AS from_uid, b.uid AS to_uid",
-                {"uids": uids},
-            )
-            edges = [
-                {"from_uid": r["from_uid"], "to_uid": r["to_uid"]}
-                for r in rows
-                if r.get("from_uid") and r.get("to_uid")
-            ]
-    finally:
-        drv.close()
-    return {"edges": edges}
-
-
 # --- Chat ---
 
 class ChatInput(BaseModel):
@@ -1538,7 +1496,6 @@ class StartRequest(BaseModel):
     goal_type: Optional[GoalType] = None
     curriculum_code: Optional[str] = None
     exam_type: Optional[ExamType] = None
-    topic_uids: Optional[List[str]] = None
 
 class OptionDTO(BaseModel):
     option_uid: str
@@ -1672,14 +1629,7 @@ def _topic_accessible(subject_uid: str, topic_uid: str, resolved_level: int, goa
 
 
 def _parse_llm_json_safely(content: str) -> dict:
-    """Parse LLM JSON tolerant к типичным огрехам моделей:
-
-    - обёртки ```json ... ``` или ``` ... ```;
-    - префикс/суффикс-проза вокруг JSON-объекта;
-    - невалидные backslash-escape (LaTeX: ``\\frac`` → json требует ``\\\\frac``);
-    - trailing comma перед ``}`` / ``]`` (частый у Gemini);
-    - одинарные кавычки вместо двойных.
-    """
+    """Parse LLM JSON with tolerance to invalid backslash escapes."""
     if not isinstance(content, str):
         raise ValueError("LLM content is not a string")
 
@@ -1690,87 +1640,28 @@ def _parse_llm_json_safely(content: str) -> dict:
         text = text.split("```", 1)[1].split("```", 1)[0]
     text = text.strip()
 
-    # Если модель обернула JSON в прозу — отрезаем по внешним фигурным скобкам.
+    candidates = [text]
+
+    # Braces-only candidate if model wrapped with extra prose.
     l = text.find("{")
     r = text.rfind("}")
     if l != -1 and r != -1 and r > l:
-        braced = text[l : r + 1]
-    else:
-        braced = text
+        candidates.append(text[l : r + 1])
 
-    def _try(s: str) -> dict | None:
+    for cand in candidates:
         try:
-            return json.loads(s)
+            return json.loads(cand)
         except json.JSONDecodeError:
-            return None
-
-    for cand in (text, braced):
-        parsed = _try(cand)
-        if parsed is not None:
-            return parsed
-
-        # 1) Чиним невалидные escape: "\(" / "\q" / "\frac" → "\\(" / "\\q" / "\\frac".
-        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", cand)
-        # 2) Убираем trailing comma перед } или ].
-        fixed = re.sub(r",(\s*[}\]])", r"\1", fixed)
-        parsed = _try(fixed)
-        if parsed is not None:
-            return parsed
-
-        # 3) Экранируем control-characters внутри строковых литералов
-        #    (Gemini иногда переносит строку внутри "prompt": "...").
-        #    JSON не допускает сырые \n, \r, \t в строке — конвертируем их в \\n и т.д.
-        escaped = _escape_control_chars_in_strings(fixed)
-        if escaped != fixed:
-            parsed = _try(escaped)
-            if parsed is not None:
-                return parsed
-
-        # 4) Heuristic: одинарные кавычки при отсутствии двойных.
-        if '"' not in cand:
-            sq_to_dq = fixed.replace("'", '"')
-            parsed = _try(sq_to_dq)
-            if parsed is not None:
-                return parsed
+            # Fix invalid escapes like "\(" or "\q"
+            fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", cand)
+            if fixed != cand:
+                try:
+                    return json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
 
     # Re-raise with original parser error for upstream retry logic
     return json.loads(text)
-
-
-def _escape_control_chars_in_strings(s: str) -> str:
-    """Заменяет сырые \n, \r, \t внутри "..."-литералов на \\n, \\r, \\t.
-
-    Идёт посимвольно, трекает состояние "внутри строки / снаружи",
-    учитывает backslash-escape. Это безопаснее, чем слепой replace,
-    т.к. не трогает переносы строк между ключами JSON.
-    """
-    out: list[str] = []
-    in_string = False
-    escape_next = False
-    for ch in s:
-        if in_string:
-            if escape_next:
-                out.append(ch)
-                escape_next = False
-            elif ch == "\\":
-                out.append(ch)
-                escape_next = True
-            elif ch == '"':
-                out.append(ch)
-                in_string = False
-            elif ch == "\n":
-                out.append("\\n")
-            elif ch == "\r":
-                out.append("\\r")
-            elif ch == "\t":
-                out.append("\\t")
-            else:
-                out.append(ch)
-        else:
-            if ch == '"':
-                in_string = True
-            out.append(ch)
-    return "".join(out)
 
 
 def _is_rate_limited_llm_error(value: Any) -> bool:
@@ -1805,30 +1696,6 @@ def _q_difficulty_bucket(difficulty: int) -> int:
     return max(0, (difficulty - 1) // 3)
 
 
-# Визуальные отсылки, которые запрещены в текстовых (не-визуальных) вопросах.
-# Если Gemini сгенерировал "на рисунке изображён треугольник" при is_visual=false,
-# студент видит обман ("на рисунке", а рисунка нет). Используется и для проверки
-# кеша (старые отравленные вопросы) и при сохранении в кеш (не кладём отравленные).
-_VISUAL_REF_PATTERN = re.compile(
-    r"(?i)(на\s+)?(рисун|чертеж|схем)(к|ке|ка|е|а|ок)"
-    r"|(см\.|смотри)\s+рис"
-    r"|изображен(ы|о|а)?"
-    r"|shown\s+in\s+(the\s+)?figure"
-    r"|see\s+figure"
-)
-
-
-def _has_visual_reference(question: Dict) -> bool:
-    """Вопрос помечен is_visual=false, но текст ссылается на рисунок/график."""
-    if question.get("is_visual") or question.get("visualization"):
-        return False
-    text = " ".join(
-        str(question.get(k, "") or "")
-        for k in ("prompt", "text", "question_text", "statement")
-    )
-    return bool(_VISUAL_REF_PATTERN.search(text))
-
-
 async def _q_cache_get(topic_uid: str, difficulty: int, exclude_uids: set) -> Dict | None:
     """Return a cached question not already seen by this student, or None."""
     try:
@@ -1837,12 +1704,8 @@ async def _q_cache_get(topic_uid: str, difficulty: int, exclude_uids: set) -> Di
         items = await r.lrange(key, 0, -1)
         for item in items:
             q = json.loads(item)
-            if q.get("question_uid") in exclude_uids:
-                continue
-            if _has_visual_reference(q):
-                # Отравленный кеш — пропускаем и регенерируем.
-                continue
-            return q
+            if q.get("question_uid") not in exclude_uids:
+                return q
     except Exception:
         pass
     return None
@@ -1850,10 +1713,6 @@ async def _q_cache_get(topic_uid: str, difficulty: int, exclude_uids: set) -> Di
 
 async def _q_cache_store(topic_uid: str, difficulty: int, question: Dict) -> None:
     """Append a generated question to the Redis cache pool."""
-    if _has_visual_reference(question):
-        # Не сохраняем в кеш вопросы, в которых текст обещает рисунок,
-        # а визуализации нет — иначе следующие студенты увидят то же самое.
-        return
     try:
         r = _get_q_cache_client()
         key = f"q_cache:{topic_uid}:{_q_difficulty_bucket(difficulty)}"
@@ -1895,125 +1754,6 @@ def _try_eval_function_at_point(question_text: str) -> float | None:
         return float(result)
     except Exception:
         return None
-
-
-def _try_eval_latex_frac_at_point(question_text: str) -> float | None:
-    r"""Evaluate LaTeX \frac{numerator}{denominator} expressions at a given x.
-
-    Detects patterns like '\frac{2x + 3}{x - 1} при x = 2' and computes
-    the numeric result.  Handles nested expressions with basic arithmetic.
-    """
-    import math as _math
-
-    text = (question_text or "")
-    # Find variable assignment
-    m_assign = re.search(r"\bx\s*=\s*([-+]?\d+(?:[.,]\d+)?)\b", text)
-    if not m_assign:
-        return None
-    try:
-        x_val = float(m_assign.group(1).replace(",", "."))
-    except ValueError:
-        return None
-
-    # Find \frac{...}{...} — supports one level of nesting
-    m_frac = re.search(
-        r"\\frac\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}",
-        text,
-    )
-    if not m_frac:
-        return None
-
-    def _latex_expr_to_python(expr: str) -> str:
-        """Convert a simple LaTeX math expression to Python-evaluable string."""
-        s = expr.strip()
-        # Convert LaTeX sqrt
-        s = re.sub(r"\\sqrt\{([^{}]+)\}", r"_math.sqrt(\1)", s)
-        # Convert LaTeX cdot / times to *
-        s = re.sub(r"\\(?:cdot|times)", "*", s)
-        # Convert ^ to **
-        s = s.replace("^", "**")
-        # Insert implicit multiplication: 2x -> 2*x, 3(x+1) -> 3*(x+1)
-        s = re.sub(r"(\d)([x(])", r"\1*\2", s)
-        return s
-
-    try:
-        num_expr = _latex_expr_to_python(m_frac.group(1))
-        den_expr = _latex_expr_to_python(m_frac.group(2))
-        allowed = {"x": x_val, "_math": _math, "abs": abs}
-        num_val = eval(num_expr, {"__builtins__": {}}, allowed)  # noqa: S307
-        den_val = eval(den_expr, {"__builtins__": {}}, allowed)  # noqa: S307
-        if den_val == 0:
-            return None
-        return float(num_val) / float(den_val)
-    except Exception:
-        return None
-
-
-def _try_verify_triangle_cosine_rule(question_text: str) -> float | None:
-    """Verify triangle side calculations using the law of cosines.
-
-    Detects patterns like 'AB = 5, AC = 7, угол A = 60°, найдите BC'
-    and computes BC = sqrt(AB² + AC² - 2·AB·AC·cos(A)).
-    Returns the expected numeric answer or None if not a triangle problem.
-    """
-    import math as _math
-
-    text = (question_text or "")
-
-    # Must mention triangle
-    if not re.search(r"треугольн|triangle", text, re.IGNORECASE):
-        return None
-
-    # Extract two known sides
-    sides: dict[str, float] = {}
-    for m in re.finditer(
-        r"([A-Z]{2})\s*=\s*([-+]?\d+(?:[.,]\d+)?)\s*(?:см|м|mm|cm|m)?\b", text
-    ):
-        sides[m.group(1)] = float(m.group(2).replace(",", "."))
-
-    if len(sides) < 2:
-        return None
-
-    # Extract angle (in degrees)
-    angle_val = None
-    # Pattern: "угол A = 60°" or "угол A равен 60°" or "∠A = 60"
-    m_angle = re.search(
-        r"(?:угол|∠)\s*[A-Z]\s*(?:=|равен|равна)\s*([-+]?\d+(?:[.,]\d+)?)\s*°?",
-        text,
-        re.IGNORECASE,
-    )
-    if m_angle:
-        angle_val = float(m_angle.group(1).replace(",", "."))
-
-    if angle_val is None:
-        return None
-
-    # Extract which side to find: "Найдите BC" or "длину стороны BC"
-    m_find = re.search(
-        r"(?:найд|вычисл|определ|длин\w*\s+сторон\w*)\s+([A-Z]{2})",
-        text,
-        re.IGNORECASE,
-    )
-    if not m_find:
-        return None
-
-    target_side = m_find.group(1)
-
-    # We need two sides that are NOT the target
-    known_sides = {k: v for k, v in sides.items() if k != target_side}
-    if len(known_sides) < 2:
-        return None
-
-    side_values = list(known_sides.values())
-    a, b = side_values[0], side_values[1]
-    angle_rad = _math.radians(angle_val)
-
-    # Law of cosines: c² = a² + b² - 2ab·cos(C)
-    c_sq = a * a + b * b - 2 * a * b * _math.cos(angle_rad)
-    if c_sq < 0:
-        return None
-
-    return _math.sqrt(c_sq)
 
 
 async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: bool = False, previous_prompts: List[str] = [], difficulty: int = 5) -> Dict:
@@ -2199,9 +1939,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     - single_choice: exactly 4 options, exactly 1 correct.
     - numeric: one numeric answer.
     - free_text: short answer.
-    - If visual=false: the question MUST be purely textual. Do NOT write "на рисунке",
-      "на чертеже", "на схеме", "изображён/изображена/изображено", "см. рисунок", "как показано".
-      Do NOT reference any figures, drawings, diagrams, graphs, or images.
+    - If visual=false, do not reference figures.
     - Coordinates mentioned in text must match visualization.
     - For quadratic with two roots, include both roots in the correct answer.
     - CRITICAL math rule: if the question asks to evaluate a function at a point (e.g. y = f(x) at x = a),
@@ -2224,7 +1962,7 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 temperature=0.35,
                 model=settings.lesson_model,
                 feature="assessment_question_generate",
-                max_tokens=2048,
+                max_tokens=520,
                 response_format={"type": "json_object"},
             )
             if not res.get("ok"):
@@ -2338,98 +2076,6 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                                             expected=expected,
                                             fixed_to=best.get("text"),
                                         )
-                        except (ValueError, TypeError):
-                            pass
-
-            # Check 5: LaTeX \frac{}{} expression evaluation at a given x.
-            if data.get("options") or data.get("correct_value"):
-                frac_expected = _try_eval_latex_frac_at_point(prompt_gen)
-                if frac_expected is not None:
-                    if q_type == "single_choice" and data.get("options"):
-                        correct_opts = [o for o in data["options"] if o.get("is_correct")]
-                        if correct_opts:
-                            try:
-                                marked = float(str(correct_opts[0].get("text", "")).strip().replace(",", "."))
-                                if abs(marked - frac_expected) >= 1e-6:
-                                    if attempt < 1:
-                                        correction_requests.append(
-                                            f"Math error: \\frac expression at given x evaluates to "
-                                            f"{frac_expected:g}, but correct option is '{correct_opts[0].get('text')}'. "
-                                            "Recalculate and fix."
-                                        )
-                                    else:
-                                        for opt in data["options"]:
-                                            try:
-                                                v = float(str(opt.get("text", "")).strip().replace(",", "."))
-                                                if abs(v - frac_expected) < 1e-6:
-                                                    for o2 in data["options"]:
-                                                        o2["is_correct"] = (o2 is opt)
-                                                    logger.warning("llm_frac_correction_forced", expected=frac_expected)
-                                                    break
-                                            except (ValueError, TypeError):
-                                                pass
-                            except (ValueError, TypeError):
-                                pass
-                    elif q_type in ("numeric", "free_text") and data.get("correct_value") is not None:
-                        try:
-                            cv_num = float(str(data["correct_value"]).strip().replace(",", "."))
-                            if abs(cv_num - frac_expected) >= 1e-6:
-                                if attempt < 1:
-                                    correction_requests.append(
-                                        f"Math error: expression evaluates to {frac_expected:g}, "
-                                        f"but correct_value is '{data['correct_value']}'. Fix it."
-                                    )
-                                else:
-                                    data["correct_value"] = str(round(frac_expected, 6) if frac_expected != int(frac_expected) else int(frac_expected))
-                                    logger.warning("llm_frac_cv_forced", expected=frac_expected)
-                        except (ValueError, TypeError):
-                            pass
-
-            # Check 6: Triangle law of cosines verification.
-            if data.get("options") or data.get("correct_value"):
-                tri_expected = _try_verify_triangle_cosine_rule(prompt_gen)
-                if tri_expected is not None:
-                    # Format expected: prefer exact sqrt if it's irrational
-                    import math as _m6
-                    tri_sq = round(tri_expected ** 2)
-                    tri_is_integer = abs(tri_expected - round(tri_expected)) < 1e-9
-                    tri_display = str(round(tri_expected)) if tri_is_integer else f"√{tri_sq}"
-
-                    if q_type == "single_choice" and data.get("options"):
-                        correct_opts = [o for o in data["options"] if o.get("is_correct")]
-                        if correct_opts:
-                            try:
-                                marked_text = str(correct_opts[0].get("text", "")).strip()
-                                # Try numeric comparison
-                                marked_val = float(marked_text.replace(",", "."))
-                                if abs(marked_val - tri_expected) >= 0.01:
-                                    if attempt < 1:
-                                        correction_requests.append(
-                                            f"Geometry error: by the law of cosines the side = {tri_display} ≈ {tri_expected:.4f}, "
-                                            f"but correct option is '{marked_text}'. Recalculate step-by-step."
-                                        )
-                                    else:
-                                        logger.warning("llm_triangle_answer_wrong", expected=tri_display, got=marked_text)
-                            except (ValueError, TypeError):
-                                pass
-                    elif q_type in ("numeric", "free_text") and data.get("correct_value") is not None:
-                        try:
-                            cv_str = str(data["correct_value"]).strip()
-                            # Parse √N notation or plain number
-                            sqrt_m = re.match(r"[√√](\d+)", cv_str)
-                            if sqrt_m:
-                                cv_num = _m6.sqrt(float(sqrt_m.group(1)))
-                            else:
-                                cv_num = float(cv_str.replace(",", "."))
-                            if abs(cv_num - tri_expected) >= 0.01:
-                                if attempt < 1:
-                                    correction_requests.append(
-                                        f"Geometry error: law of cosines gives {tri_display} ≈ {tri_expected:.4f}, "
-                                        f"but correct_value is '{cv_str}'. Fix it."
-                                    )
-                                else:
-                                    data["correct_value"] = tri_display
-                                    logger.warning("llm_triangle_cv_forced", expected=tri_display)
                         except (ValueError, TypeError):
                             pass
 
@@ -2709,9 +2355,6 @@ async def start(payload: StartRequest, request: Request) -> Dict:
         resolved = _resolve_level(uc)
 
         # Resolve topic_uid if missing (e.g. for Exam mode starting from first topic)
-        if not payload.topic_uid and payload.topic_uids:
-            payload.topic_uid = payload.topic_uids[0]
-
         if not payload.topic_uid:
             if payload.curriculum_code:
                 cv = get_graph_view(payload.curriculum_code)
@@ -2757,10 +2400,7 @@ async def start(payload: StartRequest, request: Request) -> Dict:
 
         # Build topic pool for multi-topic assessment (covers full curriculum/subject)
         topic_pool: list = []
-        if payload.topic_uids:
-            # Block diagnostic: use the explicit topic list
-            topic_pool = list(payload.topic_uids)
-        elif payload.curriculum_code:
+        if payload.curriculum_code:
             cv = get_graph_view(payload.curriculum_code)
             if not cv.get("ok") or not cv.get("nodes"):
                 raise HTTPException(
