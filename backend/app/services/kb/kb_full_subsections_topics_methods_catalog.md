@@ -31096,7 +31096,7 @@ Difficulty: сложный
 ---
 
 #### Topic: Симметрия, длина окружности и площадь круга
-`Topic UID`: `TOP-6-SIMMETRIYA-I-KRUG` | `Class range`: `6-6` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-6-SIMMETRIYA-I-KRUG` | `Class range`: `6-6` | `Methods`: `5` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Симметрия, длина окружности и площадь круга
 `UID`: `MET-INTRO-6-SIMMETRIYA-I-KRUG` | `learning_order`: `0` | `role`: `intro` | `grade`: `6` | `class_range`: `6-6` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
