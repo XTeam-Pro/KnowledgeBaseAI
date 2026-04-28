@@ -8,7 +8,8 @@ Usage:
 
 Dataset files (default: app/services/kb/):
     graph_entities.jsonl       — nodes with _label field for Neo4j label
-    graph_relationships.jsonl  — edges with _from_uid / _to_uid / _type fields
+    graph_relationships.jsonl  — edges with _from_uid / _to_uid / _type
+                                 or from_uid / to_uid / type fields
 """
 from __future__ import annotations
 
@@ -31,7 +32,21 @@ _DEFAULT_KB_DIR = _SCRIPT_DIR.parent / "app" / "services" / "kb"
 
 # Internal fields that are NOT node properties
 _SKIP_ENTITY_FIELDS = frozenset({"_label", "tenant_id"})
-_SKIP_REL_FIELDS = frozenset({"_from_uid", "_to_uid", "_type", "tenant_id"})
+_SKIP_REL_FIELDS = frozenset(
+    {"_from_uid", "_to_uid", "_type", "from_uid", "to_uid", "type", "tenant_id"}
+)
+
+
+def _rel_from_uid(rec: dict[str, Any]) -> str:
+    return str(rec.get("_from_uid") or rec.get("from_uid") or "")
+
+
+def _rel_to_uid(rec: dict[str, Any]) -> str:
+    return str(rec.get("_to_uid") or rec.get("to_uid") or "")
+
+
+def _rel_type(rec: dict[str, Any]) -> str:
+    return str(rec.get("_type") or rec.get("type") or "LINKED")
 
 
 def _is_primitive(value: Any) -> bool:
@@ -143,9 +158,9 @@ def _import_relationships(session, rels: list[dict], tenant_id: str) -> tuple[in
         def _write_batch(tx, batch=batch):
             nonlocal merged, skipped
             for rec in batch:
-                from_uid = str(rec.get("_from_uid") or "")
-                to_uid = str(rec.get("_to_uid") or "")
-                rel_type = str(rec.get("_type") or "LINKED")
+                from_uid = _rel_from_uid(rec)
+                to_uid = _rel_to_uid(rec)
+                rel_type = _rel_type(rec)
                 uid = str(rec.get("uid") or "")
                 if not from_uid or not to_uid:
                     skipped += 1
@@ -196,7 +211,7 @@ def main() -> None:
     # Summary by label
     from collections import Counter
     label_counts = Counter(r.get("_label") or r.get("type") for r in entities)
-    rel_counts = Counter(r.get("_type") for r in rels)
+    rel_counts = Counter(_rel_type(r) for r in rels)
 
     print(f"\nDataset summary:")
     print(f"  Total entities : {len(entities)}")
