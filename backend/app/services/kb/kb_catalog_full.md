@@ -32812,7 +32812,7 @@ Difficulty: 3
 ---
 
 #### Topic: Площади
-`Topic UID`: `TOP-PLOSCHADI-c811e2` | `Class range`: `5-9` | `Methods`: `12` | `Статус`: `processed` | `Tag`: `ready`
+`Topic UID`: `TOP-PLOSCHADI-c811e2` | `Class range`: `5-9` | `Methods`: `12` | `Статус`: `processed` | `Tag`: `ready2.0`
 
 ##### Метод: Введение в тему: Площади
 `UID`: `MET-INTRO-PLOSCHADI-C811E2` | `learning_order`: `0` | `role`: `intro` | `grade`: `5` | `class_range`: `5-9` | `visualization`: `geometric_figure` | `visualization_type`: `-` | `answer_type`: `-`
