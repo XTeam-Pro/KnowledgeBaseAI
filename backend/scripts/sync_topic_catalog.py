@@ -12,14 +12,14 @@ import re
 import sys
 from pathlib import Path
 
+
 def load_graph():
     """Загрузка графа из JSONL файлов"""
     entities_path = (
-        Path(__file__).parent.parent / "backend/app/services/kb/graph_entities.jsonl"
+        Path(__file__).parent.parent / "app/services/kb/graph_entities.jsonl"
     )
     rels_path = (
-        Path(__file__).parent.parent
-        / "backend/app/services/kb/graph_relationships.jsonl"
+        Path(__file__).parent.parent / "app/services/kb/graph_relationships.jsonl"
     )
 
     with open(entities_path, "r", encoding="utf-8") as f:
@@ -222,9 +222,7 @@ def sync_topic_catalog(topic_uid):
     print(f"Методов в графе: {len(graph_method_uids)}")
 
     # Загрузка каталога
-    catalog_path = (
-        Path(__file__).parent.parent / "backend/app/services/kb/kb_catalog_full.md"
-    )
+    catalog_path = Path(__file__).parent.parent / "app/services/kb/kb_catalog_full.md"
     with open(catalog_path, "r", encoding="utf-8") as f:
         content = f.read()
 
@@ -277,8 +275,9 @@ def sync_topic_catalog(topic_uid):
 
     # Обновить заголовок темы (счётчик методов и статус)
     # Найти строку с Topic UID
-    topic_line_pattern = f"`Topic UID`: `{topic_uid}`.*?\\n"
+    topic_line_pattern = f"`Topic UID`: `{topic_uid}`.*?\n"
     match = re.search(topic_line_pattern, content)
+    ready2_updated = False
     if match:
         old_line = match.group(0).rstrip("\n")
         # Обновить счётчик и статус
@@ -287,10 +286,33 @@ def sync_topic_catalog(topic_uid):
             r"`Methods`: `\d+`", f"`Methods`: `{len(graph_method_uids)}`", new_line
         )
         new_line = re.sub(r"`Tag`: `\w+`", "`Tag`: `ready2.0`", new_line)
+
+        # Проверить, был ли уже ready2.0
+        old_tag_match = re.search(r"`Tag`: `(\w+)`", old_line)
+        old_tag = old_tag_match.group(1) if old_tag_match else ""
+
         content = content.replace(old_line, new_line)
         print(f"Обновлён заголовок темы: {len(graph_method_uids)} методов, ready2.0")
+
+        # Если тег был не ready2.0 - увеличить счетчик ready2.0
+        if old_tag != "ready2.0":
+            ready2_updated = True
     else:
         print("WARNING: Не найден заголовок темы для обновления")
+
+    # Обновить счётчик ready2.0 в справочной информации
+    if ready2_updated:
+        ready2_pattern = r"- 🚀 ready2\.0: `(\d+)`"
+        ready2_match = re.search(ready2_pattern, content)
+        if ready2_match:
+            current_count = int(ready2_match.group(1))
+            new_count = current_count + 1
+            old_line = ready2_match.group(0)
+            new_line = old_line.replace(f"`{current_count}`", f"`{new_count}`")
+            content = content.replace(old_line, new_line)
+            print(f"Обновлён счётчик ready2.0: {current_count} -> {new_count}")
+        else:
+            print("WARNING: Не найден счётчик ready2.0 в справочной информации")
 
     # Сохранить каталог
     with open(catalog_path, "w", encoding="utf-8") as f:
