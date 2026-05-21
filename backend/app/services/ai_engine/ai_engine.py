@@ -2,9 +2,10 @@ from typing import List
 from pydantic import BaseModel, Field
 import json
 import asyncio
-from app.config.settings import settings
 from app.services.kb.jsonl_io import load_jsonl, get_path
 from app.services.graph.neo4j_repo import Neo4jRepo
+from app.services.kb.builder import openai_chat_async
+from app.config.settings import settings
 import os
 
 def load_all_jsonl(filename: str) -> List[dict]:
@@ -44,21 +45,21 @@ class GeneratedBundle(BaseModel):
     skills: List[GeneratedSkill]
 
 async def generate_concepts_and_skills(topic: str, language: str) -> GeneratedBundle:
-    try:
-        from openai import AsyncOpenAI
-    except Exception:
-        return GeneratedBundle(concepts=[], skills=[])
-    oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
     messages = [
         {"role": "system", "content": "Return structured JSON for concepts and skills in the target language."},
         {"role": "user", "content": f"topic={topic}; lang={language}"},
     ]
-    resp = await oai.chat.completions.create(
-        model="gpt-4o-mini",
+    res = await openai_chat_async(
         messages=messages,
+        model=settings.fast_model,
+        temperature=0.2,
+        feature="ai_engine_concepts_skills",
+        max_tokens=650,
         response_format={"type": "json_object"},
     )
-    content = resp.choices[0].message.content or "{}"
+    if not res.get("ok"):
+        return GeneratedBundle(concepts=[], skills=[])
+    content = res.get("content") or "{}"
     data = json.loads(content)
     return GeneratedBundle.model_validate(data)
 

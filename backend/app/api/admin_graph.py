@@ -13,6 +13,7 @@ from app.workers.commit import commit_proposal
 from app.db.pg import get_conn, ensure_tables, get_graph_version, set_proposal_status
 
 from app.core.canonical import ALLOWED_NODE_LABELS, ALLOWED_EDGE_TYPES
+from app.events.telemetry import track_event
 
 router = APIRouter(prefix="/v1/admin/graph", dependencies=[Depends(require_admin), Security(HTTPBearer())], tags=["Админка: граф"])
 
@@ -125,6 +126,10 @@ async def create_node(payload: NodeCreateInput, x_tenant_id: str = Header(..., a
     )
     
     await _execute_admin_proposal(x_tenant_id, [op])
+    try:
+        track_event("kb_node_created", {"uid": payload.uid, "labels": labels})
+    except Exception:
+        pass
     return {"uid": payload.uid}
 
 
@@ -200,6 +205,10 @@ async def delete_node(uid: str, detach: bool = False, x_tenant_id: str = Header(
     )
     
     await _execute_admin_proposal(x_tenant_id, [op])
+    try:
+        track_event("kb_node_deleted", {"uid": uid})
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -233,6 +242,10 @@ async def create_edge(payload: EdgeCreateInput, x_tenant_id: str = Header(..., a
     )
     
     await _execute_admin_proposal(x_tenant_id, [op])
+    try:
+        track_event("kb_edge_created", {"edge_uid": edge_uid, "type": rel_type})
+    except Exception:
+        pass
     return {"edge_uid": edge_uid}
 
 
@@ -336,6 +349,10 @@ async def delete_edge(edge_uid: str, x_tenant_id: str = Header(..., alias="X-Ten
         properties_delta={},
         requires_review=False
     )
-    
+
     await _execute_admin_proposal(x_tenant_id, [op])
+    try:
+        track_event("kb_edge_deleted", {"edge_uid": edge_uid})
+    except Exception:
+        pass
     return {"ok": True}

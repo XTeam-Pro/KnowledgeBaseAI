@@ -49,32 +49,57 @@ def select_examples_for_topics(
     difficulty_max: int = 5,
     exclude_uids: Set[str] | None = None,
     tenant_id: str | None = None,
+    method_role: str | None = None,
 ):
     exclude = exclude_uids or set()
     pool: List[Dict] = []
     if settings.neo4j_uri and settings.neo4j_user and settings.neo4j_password.get_secret_value():
         try:
             repo = Neo4jRepo()
+            # When method_role is specified, filter Method nodes by that role
+            if method_role:
+                method_match = (
+                    "OPTIONAL MATCH (t)-[:REQUIRES_SKILL]->(:Skill)-[:HAS_METHOD]->(m:Method)"
+                    "-[:HAS_EXAMPLE]->(ex2:Example) WHERE m.method_role = $mrole "
+                )
+            else:
+                method_match = (
+                    "OPTIONAL MATCH (t)-[:REQUIRES_SKILL]->(:Skill)-[:HAS_METHOD]->(:Method)"
+                    "-[:HAS_EXAMPLE]->(ex2:Example) "
+                )
             rows = repo.read(
                 (
                     "UNWIND $t AS tuid "
                     "MATCH (t:Topic {uid:tuid}) "
                     "WHERE ($tid IS NULL OR t.tenant_id = $tid) "
-                    "OPTIONAL MATCH (t)-[:HAS_EXAMPLE]->(ex:Example) "
+                    "OPTIONAL MATCH (t)-[:HAS_EXAMPLE]->(ex1:Example) "
+                    + method_match +
                     "OPTIONAL MATCH (t)-[:HAS_QUESTION|CONTAINS]->(q:Question) "
-                    "WITH t, ex, q "
-                    "WHERE ex IS NOT NULL OR q IS NOT NULL "
-                    "RETURN coalesce(q.uid, ex.uid) AS uid, "
-                    "       coalesce(q.title, ex.title) AS title, "
-                    "       coalesce(q.text, q.statement, ex.statement) AS statement, "
-                    "       coalesce(q.difficulty, ex.difficulty_level) AS difficulty, "
-                    "       t.uid AS topic_uid, "
-                    "       q.type AS type, "
-                    "       q.options AS options, "
-                    "       q.is_visual AS is_visual, "
-                    "       q.visualization AS visualization"
+                    "WITH t, "
+                    "     collect(DISTINCT ex1) + collect(DISTINCT ex2) AS examples, "
+                    "     collect(DISTINCT q) AS questions "
+                    "WITH t, "
+                    "     [ex IN examples | {uid: ex.uid, title: ex.title, "
+                    "         statement: coalesce(ex.statement, ex.text), "
+                    "         difficulty: ex.difficulty_level, type: null, "
+                    "         options: null, is_visual: null, visualization: null, "
+                    "         correct_answer: coalesce(ex.solution, ex.answer)}] AS ex_rows, "
+                    "     [q IN questions | {uid: q.uid, title: q.title, "
+                    "         statement: q.statement, "
+                    "         difficulty: q.difficulty, type: q.type, "
+                    "         options: q.options, is_visual: q.is_visual, "
+                    "         visualization: q.visualization, "
+                    "         correct_answer: q.correct_answer}] AS q_rows "
+                    "WITH t, ex_rows + q_rows AS all_rows "
+                    "WHERE size(all_rows) > 0 "
+                    "UNWIND all_rows AS row "
+                    "RETURN row.uid AS uid, row.title AS title, row.statement AS statement, "
+                    "       row.difficulty AS difficulty, t.uid AS topic_uid, "
+                    "       row.type AS type, row.options AS options, "
+                    "       row.is_visual AS is_visual, row.visualization AS visualization, "
+                    "       row.correct_answer AS correct_answer"
                 ),
-                {"t": topic_uids, "tid": tenant_id}
+                {"t": topic_uids, "tid": tenant_id, "mrole": method_role}
             )
             def _norm(x):
                 try:
@@ -85,12 +110,17 @@ def select_examples_for_topics(
             for r in rows:
                 d_raw = r.get('difficulty', 3)
                 try:
-                    d_int = int(float(d_raw))
+                    d_float = float(d_raw)
+                    # Handle both 0–1 scale (Neo4j float) and 1–10 integer scale
+                    d_int = max(1, round(d_float * 10)) if d_float <= 1.0 else int(d_float)
                 except Exception:
                     d_int = 3
                 if d_int < difficulty_min or d_int > difficulty_max:
                     continue
                 if r.get('uid') in exclude:
+                    continue
+                # Skip rows without a real problem statement (section headers, empty titles etc.)
+                if not str(r.get('statement') or '').strip():
                     continue
                 r['difficulty'] = _norm(d_raw)
                 
@@ -124,7 +154,9 @@ def select_examples_for_topics(
                 for e in idx["by_topic"].get(tu, []):
                     d_raw = e.get('difficulty', 3)
                     try:
-                        d = int(float(d_raw))
+                        d_float = float(d_raw)
+                        # Handle both 0–1 scale (float) and 1–10 integer scale
+                        d = max(1, round(d_float * 10)) if d_float <= 1.0 else int(d_float)
                     except Exception:
                         d = 3
                     if d < difficulty_min or d > difficulty_max:
@@ -184,3 +216,25 @@ def select_examples_for_topics(
 def all_topic_uids_from_examples() -> List[str]:
     idx = get_examples_indexed()
     return list(idx["by_topic"].keys())
+
+
+def select_test_out_questions(
+    topic_uid: str,
+    difficulty_min: int = 7,
+    limit: int = 5,
+    exclude_uids: Set[str] | None = None,
+    tenant_id: str | None = None,
+) -> List[Dict]:
+    """Select high-difficulty questions for test-out assessment.
+
+    Returns only questions with difficulty >= difficulty_min for the given topic.
+    Used by advanced students to prove mastery and skip topics.
+    """
+    return select_examples_for_topics(
+        topic_uids=[topic_uid],
+        limit=limit,
+        difficulty_min=difficulty_min,
+        difficulty_max=10,
+        exclude_uids=exclude_uids,
+        tenant_id=tenant_id,
+    )

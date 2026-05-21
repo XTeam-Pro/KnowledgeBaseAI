@@ -1,14 +1,13 @@
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional, Any, Set
 from enum import Enum
 import json
-import re
 from app.services.graph.neo4j_repo import relation_context, neighbors, get_node_details, get_driver, Neo4jRepo
 from app.config.settings import settings
 from app.services.roadmap_planner import plan_route
-from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples
+from app.services.questions import select_examples_for_topics, all_topic_uids_from_examples, select_test_out_questions
 from app.api.common import ApiError, StandardResponse
 from app.core.context import get_tenant_id
 from app.schemas.roadmap import RoadmapRequest
@@ -18,18 +17,160 @@ from app.services.reasoning.next_best_topic import next_best_topics
 from app.services.reasoning.mastery_update import update_mastery
 from app.services.curriculum.repo import get_graph_view
 from typing import Dict, List, Optional, Any
+import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from starlette.responses import StreamingResponse
 from app.services.graph.neo4j_repo import Neo4jRepo
 from app.services.questions import select_examples_for_topics
 from app.events.publisher import get_redis
+from app.events.telemetry import track_event
 from app.services.kb.builder import openai_chat_async
 from app.services.visualization.geometry import GeometryEngine
+from app.services.visualization.graph_engine import GraphEngine
+from app.core.logging import logger
 import random
 import uuid
+import zlib
+import base64
 
 router = APIRouter()
+
+_ROADMAP_CACHE_TTL_SECONDS = 900
+
+
+def _derive_statement_from_blob(blob_text: str, fallback_title: str = "") -> str:
+    """Extract a clean task statement from a KB description blob."""
+    raw = str(blob_text or "").strip()
+    if not raw:
+        return str(fallback_title or "").strip()
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln and ln.strip()]
+    if not lines:
+        return str(fallback_title or "").strip()
+
+    # Prefer explicit task line.
+    for ln in lines:
+        if re.match(r"^\s*задача\s*:", ln, flags=re.IGNORECASE):
+            candidate = ln
+            break
+    else:
+        # Skip obvious non-statement lines.
+        candidate = ""
+        for ln in lines:
+            if re.match(r"^\s*шаг\s*\d+\s*:", ln, flags=re.IGNORECASE):
+                continue
+            if re.match(r"^\s*ответ\s*:", ln, flags=re.IGNORECASE):
+                continue
+            if re.match(r"^\s*решение\s*:", ln, flags=re.IGNORECASE):
+                continue
+            if re.match(r"^\s*источник\s*:", ln, flags=re.IGNORECASE):
+                continue
+            candidate = ln
+            break
+
+    candidate = candidate or str(fallback_title or "").strip()
+    if not candidate:
+        return ""
+
+    # If answer/steps leaked into the same line, trim tail.
+    candidate = re.split(r"\bшаг\s*1\s*:", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    candidate = re.split(r"\bответ\s*:", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+    return candidate.rstrip(".").strip()
+
+
+def _normalize_method_examples_for_client(examples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure example.statement contains only the question stem."""
+    normalized: list[dict[str, Any]] = []
+    for ex in examples:
+        row = dict(ex or {})
+        title = str(row.get("title") or "").strip()
+        statement_raw = str(row.get("statement") or "").strip()
+        solution_raw = str(row.get("solution") or "").strip()
+
+        statement_looks_like_solution = bool(
+            re.search(r"\bшаг\s*\d+\s*:", statement_raw, flags=re.IGNORECASE)
+            or re.search(r"\bответ\s*:", statement_raw, flags=re.IGNORECASE)
+            or re.search(r"\bрешение\s*:", statement_raw, flags=re.IGNORECASE)
+        )
+
+        if not statement_raw or statement_looks_like_solution:
+            statement_raw = _derive_statement_from_blob(solution_raw or statement_raw, title)
+
+        if not solution_raw:
+            solution_raw = str(row.get("statement") or "").strip()
+
+        row["statement"] = statement_raw or title
+        row["solution"] = solution_raw or statement_raw or title
+        normalized.append(row)
+    return normalized
+
+
+def _request_scope(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _enforce_rate_limit(request: Request, *, route_key: str, limit: int, window_sec: int = 60) -> None:
+    """Simple fixed-window limiter backed by Redis."""
+    try:
+        r = get_redis()
+        key = f"rl:{route_key}:{_request_scope(request)}"
+        current = int(r.incr(key))
+        if current == 1:
+            r.expire(key, window_sec)
+        if current > limit:
+            raise HTTPException(status_code=429, detail="Rate limit exceeded, please try again later.")
+    except HTTPException:
+        raise
+    except Exception:
+        # Fail-open to avoid breaking core flows if Redis is unavailable.
+        return
+
+
+def _roadmap_cache_key(payload: "RoadmapRequest", progress: dict[str, float]) -> str:
+    compact_progress = sorted(
+        ((k, round(float(v or 0.0), 3)) for k, v in (progress or {}).items()),
+        key=lambda kv: kv[0],
+    )[:40]
+    raw = json.dumps(
+        {
+            "subject_uid": payload.subject_uid,
+            "focus_topic_uid": payload.focus_topic_uid,
+            "limit": payload.limit,
+            "curriculum_code": payload.curriculum_code,
+            "student_tier": payload.student_tier,
+            "progress": compact_progress,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"roadmap:v3:{zlib.crc32(raw.encode('utf-8')):08x}"
+
+
+def _roadmap_cache_get(cache_key: str) -> Optional[Dict[str, Any]]:
+    try:
+        r = get_redis()
+        raw = r.get(cache_key)
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _roadmap_cache_set(cache_key: str, value: Dict[str, Any]) -> None:
+    try:
+        r = get_redis()
+        r.setex(cache_key, _ROADMAP_CACHE_TTL_SECONDS, json.dumps(value, ensure_ascii=False))
+    except Exception:
+        return
 
 # --- Graph / Viewport ---
 
@@ -57,10 +198,388 @@ async def get_node(uid: str) -> Dict:
         raise HTTPException(status_code=404, detail="Node not found")
     return {"items": [data], "meta": {}}
 
+
+@router.get("/method/{method_uid}", response_model=StandardResponse, summary="Get Method node + examples")
+async def get_method(method_uid: str, user_class: Optional[int] = None) -> Dict:
+    """Return a Method node with its examples and parent skill/topic context.
+
+    Used by StudyNinja-API to generate GRR micro-lessons anchored to one Method.
+    Query traversal: Topic ← [:REQUIRES_SKILL] ← Skill ← [:HAS_METHOD] ← Method
+    Examples are fetched from Method → HAS_EXAMPLE → Example.
+
+    If ``user_class`` is provided, only examples appropriate for that grade are returned.
+    """
+    repo = Neo4jRepo()
+    try:
+        rows = repo.read(
+            """
+            MATCH (m:Method {uid: $uid})
+            OPTIONAL MATCH (sk:Skill)-[:HAS_METHOD]->(m)
+            OPTIONAL MATCH (t:Topic)-[:REQUIRES_SKILL]->(sk)
+            OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
+                WHERE $user_class IS NULL
+                      OR (ex.user_class_min IS NOT NULL
+                          AND ex.user_class_min <= $user_class
+                          AND ex.user_class_max >= $user_class)
+                      OR (ex.user_class_min IS NULL
+                          AND NOT EXISTS {
+                              MATCH (m)-[:HAS_EXAMPLE]->(ge:Example)
+                              WHERE ge.user_class_min IS NOT NULL
+                          })
+            RETURN
+                m.uid            AS uid,
+                m.title          AS title,
+                m.description    AS description,
+                m.algorithm      AS algorithm,
+                m.algorithm_steps AS algorithm_steps,
+                m.user_class_min AS user_class_min,
+                m.user_class_max AS user_class_max,
+                m.method_role    AS method_role,
+                coalesce(m.viz_type, m.visualization_type) AS viz_type,
+                m.visualization  AS visualization,
+                m.viz_params     AS viz_params,
+                m.key_formula    AS key_formula,
+                m.answer_type    AS answer_type,
+                sk.uid           AS skill_uid,
+                sk.title         AS skill_title,
+                t.uid            AS topic_uid,
+                t.title          AS topic_title,
+                collect(DISTINCT {
+                    uid: ex.uid, title: ex.title,
+                    statement: coalesce(ex.statement, ex.description), solution: coalesce(ex.solution, ex.description),
+                    answer: coalesce(ex.answer, ex.correct_answer),
+                    difficulty: coalesce(ex.difficulty, ex.difficulty_level),
+                    user_class_min: ex.user_class_min,
+                    user_class_max: ex.user_class_max,
+                    viz_type: ex.viz_type,
+                    visualization: ex.visualization,
+                    viz_params: ex.viz_params,
+                    hints: ex.hints,
+                    answer_type: ex.answer_type,
+                    solution_steps: ex.solution_steps
+                }) AS method_examples
+            """,
+            {"uid": method_uid, "user_class": user_class},
+        )
+    finally:
+        repo.close()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Method not found")
+
+    r = rows[0]
+
+    examples = [e for e in (r.get("method_examples") or []) if e.get("uid")]
+    examples = _normalize_method_examples_for_client(examples)
+
+    return {
+        "items": [{
+            "uid":            r.get("uid") or method_uid,
+            "title":          r.get("title") or "",
+            "description":    r.get("description") or "",
+            "algorithm":      r.get("algorithm") or "",
+            "algorithm_steps": r.get("algorithm_steps") or [],
+            "user_class_min": r.get("user_class_min"),
+            "user_class_max": r.get("user_class_max"),
+            "method_role":    r.get("method_role") or "core",
+            "viz_type":       r.get("viz_type"),
+            "visualization":  r.get("visualization"),
+            "viz_params":     r.get("viz_params"),
+            "key_formula":    r.get("key_formula"),
+            "answer_type":    r.get("answer_type"),
+            "skill_uid":      r.get("skill_uid") or "",
+            "skill_title":    r.get("skill_title") or "",
+            "topic_uid":      r.get("topic_uid") or "",
+            "topic_title":    r.get("topic_title") or "",
+            "examples":       examples,
+        }],
+        "meta": {},
+    }
+
+def _apply_learning_mode_filter(
+    items: list,
+    user_class: Optional[int],
+    learning_mode: str,
+) -> list:
+    """Filter method items by learning_mode + user_class.
+
+    NULL boundaries are normalised: user_class_min=NULL→2, user_class_max=NULL→11.
+    """
+    if user_class is None or learning_mode == "full_from_zero":
+        return items
+
+    result = []
+    for item in items:
+        min_c: int = item["user_class_min"] if item["user_class_min"] is not None else 2
+        max_c: int = item["user_class_max"] if item["user_class_max"] is not None else 11
+
+        if learning_mode == "quick_current_level":
+            if min_c <= user_class <= max_c:
+                result.append(item)
+        elif learning_mode == "review_up_to_my_class":
+            if min_c <= user_class:
+                result.append(item)
+        elif learning_mode == "current_level_and_above":
+            if max_c >= user_class:
+                result.append(item)
+        else:
+            result.append(item)
+    return result
+
+
+@router.get("/topic/{topic_uid}/methods", response_model=StandardResponse, summary="List Methods for a Topic")
+async def get_topic_methods(
+    topic_uid: str,
+    user_class: Optional[int] = None,
+    learning_mode: Optional[str] = None,
+) -> Dict:
+    """Return all Method nodes reachable from a Topic via Topic→REQUIRES_SKILL→Skill→HAS_METHOD→Method.
+
+    ``learning_mode`` controls grade filtering:
+      - ``quick_current_level``      — min_c ≤ user_class ≤ max_c
+      - ``review_up_to_my_class``    — min_c ≤ user_class  (default when user_class given)
+      - ``current_level_and_above``  — max_c ≥ user_class
+      - ``full_from_zero``           — no grade filter
+
+    NULL boundaries are normalised: user_class_min=NULL→2, user_class_max=NULL→11.
+    """
+    effective_mode = learning_mode or ("review_up_to_my_class" if user_class is not None else "full_from_zero")
+
+    repo = Neo4jRepo()
+    try:
+        # Fetch ALL methods; Python-side filtering applies the mode logic.
+        cypher = """
+            MATCH (t:Topic {uid: $uid})-[:REQUIRES_SKILL]->(sk:Skill)-[:HAS_METHOD]->(m:Method)
+            OPTIONAL MATCH (m)-[:HAS_EXAMPLE]->(ex:Example)
+            WITH t, sk, m, count(ex) AS example_count
+            RETURN
+                m.uid          AS uid,
+                m.title        AS title,
+                m.description  AS description,
+                m.user_class_min AS user_class_min,
+                m.user_class_max AS user_class_max,
+                m.method_role  AS method_role,
+                m.learning_order AS learning_order,
+                sk.uid         AS skill_uid,
+                sk.title       AS skill_title,
+                t.uid          AS topic_uid,
+                t.title        AS topic_title,
+                example_count
+            ORDER BY
+                m.learning_order ASC,
+                m.user_class_min ASC,
+                m.title ASC
+            """
+        rows = repo.read(cypher, {"uid": topic_uid})
+    finally:
+        repo.close()
+
+    all_items = [
+        {
+            "uid":            r.get("uid") or "",
+            "title":          r.get("title") or "",
+            "description":    r.get("description") or "",
+            "user_class_min": r.get("user_class_min"),
+            "user_class_max": r.get("user_class_max"),
+            "method_role":    r.get("method_role") or "core",
+            "learning_order": r.get("learning_order") or 0,
+            "skill_uid":      r.get("skill_uid") or "",
+            "skill_title":    r.get("skill_title") or "",
+            "topic_uid":      r.get("topic_uid") or topic_uid,
+            "topic_title":    r.get("topic_title") or "",
+            "example_count":  r.get("example_count") or 0,
+        }
+        for r in rows
+        if r.get("uid")
+    ]
+
+    # Deduplicate by title: prefer graded method over ungraded duplicate.
+    seen_titles: dict = {}
+    for item in all_items:
+        title = item["title"]
+        if title not in seen_titles:
+            seen_titles[title] = item
+        else:
+            existing = seen_titles[title]
+            if existing["user_class_min"] is None and item["user_class_min"] is not None:
+                seen_titles[title] = item
+    deduped = list(seen_titles.values())
+
+    # Apply mode-based grade filter.
+    items = _apply_learning_mode_filter(deduped, user_class, effective_mode)
+
+    # Build empty-route metadata for quick_current_level.
+    empty_route = False
+    empty_reason: Optional[str] = None
+    suggested_modes: list = []
+    if not items and effective_mode == "quick_current_level" and deduped:
+        empty_route = True
+        empty_reason = "no_methods_for_user_class"
+        suggested_modes = ["review_up_to_my_class", "full_from_zero"]
+
+    return {
+        "items": items,
+        "meta": {
+            "topic_uid": topic_uid,
+            "total": len(items),
+            "learning_mode": effective_mode,
+        },
+        "empty_route": empty_route,
+        "empty_reason": empty_reason,
+        "suggested_modes": suggested_modes,
+    }
+
+
 @router.get("/viewport", response_model=StandardResponse)
 async def viewport(center_uid: str, depth: int = 1) -> Dict:
     ns, es = neighbors(center_uid, depth=depth, tenant_id=get_tenant_id())
     return {"items": ns, "meta": {"edges": es, "center_uid": center_uid, "depth": depth}}
+
+
+class ViewportAdvancedRequest(BaseModel):
+    center_uid: str
+    depth: int = Field(default=3, ge=1, le=10)
+    filter_by_mastery: bool = False
+    filter_by_difficulty_min: Optional[int] = None
+    filter_by_difficulty_max: Optional[int] = None
+    show_cross_domain: bool = False
+    student_tier: str = "standard"
+    progress: Dict[str, float] = Field(default_factory=dict)
+
+
+@router.post("/viewport-advanced", response_model=StandardResponse)
+async def viewport_advanced(payload: ViewportAdvancedRequest) -> Dict:
+    """Advanced viewport for advanced/gifted/olympiad students.
+
+    Returns full subgraph with enriched metadata (difficulty, mastery_tier, olympiad_flag).
+    """
+    tenant_id = get_tenant_id()
+    depth = min(payload.depth, 10)
+
+    # Build Cypher query with optional BRIDGES_TO edges
+    rel_types = "PREREQ|CONTAINS|REQUIRES_SKILL"
+    if payload.show_cross_domain:
+        rel_types += "|BRIDGES_TO"
+
+    repo = Neo4jRepo()
+    query = (
+        f"MATCH p=(c {{uid:$uid}})-[:{rel_types}*0..{depth}]-(n) "
+        "WHERE ($tid IS NULL OR c.tenant_id = $tid) "
+        "RETURN DISTINCT n, labels(n) AS node_labels, "
+        "coalesce(n.difficulty_level, 5) AS difficulty_level, "
+        "coalesce(n.olympiad_flag, false) AS olympiad_flag"
+    )
+    rows = repo.read(query, {"uid": payload.center_uid, "tid": tenant_id})
+
+    # Fetch edges separately
+    edge_query = (
+        f"MATCH (c {{uid:$uid}})-[:{rel_types}*0..{depth}]-(a) "
+        f"WITH collect(DISTINCT a) AS ns "
+        f"UNWIND ns AS a "
+        f"MATCH (a)-[r]->(b) WHERE b IN ns "
+        f"RETURN DISTINCT a.uid AS source, b.uid AS target, type(r) AS kind"
+    )
+    edge_rows = repo.read(edge_query, {"uid": payload.center_uid, "tid": tenant_id})
+    repo.close()
+
+    nodes = []
+    for r in rows:
+        n = r.get("n", {})
+        if isinstance(n, dict):
+            n_props = n
+        else:
+            n_props = dict(n) if hasattr(n, '__iter__') else {}
+
+        uid = n_props.get("uid", "")
+        if not uid:
+            continue
+
+        difficulty = int(r.get("difficulty_level", 5))
+        mastery = payload.progress.get(uid, 0.0)
+
+        # Apply filters
+        if payload.filter_by_mastery and mastery >= 0.85:
+            continue
+        if payload.filter_by_difficulty_min is not None and difficulty < payload.filter_by_difficulty_min:
+            continue
+        if payload.filter_by_difficulty_max is not None and difficulty > payload.filter_by_difficulty_max:
+            continue
+
+        # Compute mastery_tier
+        if mastery >= 0.85:
+            mastery_tier = "mastered"
+        elif mastery >= 0.5:
+            mastery_tier = "progressing"
+        elif mastery > 0:
+            mastery_tier = "learning"
+        else:
+            mastery_tier = "unstarted"
+
+        nodes.append({
+            "uid": uid,
+            "title": n_props.get("title", ""),
+            "labels": list(r.get("node_labels", [])),
+            "difficulty_level": difficulty,
+            "mastery": mastery,
+            "mastery_tier": mastery_tier,
+            "olympiad_flag": bool(r.get("olympiad_flag", False)),
+        })
+
+    edges = [
+        {"source": e["source"], "target": e["target"], "kind": e["kind"]}
+        for e in edge_rows if e.get("source") and e.get("target")
+    ]
+
+    return {
+        "items": nodes,
+        "meta": {
+            "edges": edges,
+            "center_uid": payload.center_uid,
+            "depth": depth,
+            "student_tier": payload.student_tier,
+            "total_nodes": len(nodes),
+        },
+    }
+
+
+class NextPrereqResponse(BaseModel):
+    uid: str
+    title: str
+    weight: float
+
+
+@router.get("/topic/{uid}/next-prereq", summary="Get next topic via highest PREREQ weight")
+async def get_next_prereq_topic(uid: str) -> Dict:
+    """Return the topic that should be studied after completing `uid`.
+
+    Direction: (next_topic)-[:PREREQ {weight}]->(completed_topic). Topics where
+    `uid` is a direct prerequisite are candidates for "what's next". The one with
+    the highest weight is returned.
+    """
+    drv = get_driver()
+    try:
+        with drv.session() as s:
+            record = s.run(
+                """
+                MATCH (next:Topic)-[r:PREREQ]->(t:Topic {uid: $uid})
+                RETURN next.uid AS uid, next.title AS title, r.weight AS weight
+                ORDER BY r.weight DESC
+                LIMIT 1
+                """,
+                {"uid": uid},
+            ).single()
+    finally:
+        drv.close()
+
+    if record is None:
+        raise HTTPException(status_code=404, detail="No next topic found for this uid")
+
+    return {
+        "uid": record["uid"],
+        "title": record["title"],
+        "weight": record["weight"] or 0,
+    }
+
 
 class PathfindInput(BaseModel):
     target_uid: str
@@ -117,28 +636,46 @@ class ChatResponse(BaseModel):
     context: Dict = {}
 
 @router.post("/chat", summary="Explain relationship (RAG)", response_model=ChatResponse)
-async def chat(payload: ChatInput) -> Dict:
+async def chat(payload: ChatInput, request: Request) -> Dict:
+    _enforce_rate_limit(request, route_key="engine_chat", limit=40, window_sec=60)
+
+    # Redis cache for relation chat (saves ~40-50% LLM calls)
+    import hashlib as _hl
+    _q_hash = _hl.sha256(payload.question.encode()).hexdigest()[:12]
+    _rel_cache_key = f"rel_chat:{payload.from_uid}:{payload.to_uid}:{_q_hash}"
     try:
-        from openai import AsyncOpenAI
-        from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
+        _rc = _get_q_cache_client()
+        _cached = await _rc.get(_rel_cache_key)
+        if _cached:
+            _cached_data = json.loads(_cached)
+            return _cached_data
     except Exception:
-        raise HTTPException(status_code=503, detail="OpenAI client is not available")
+        pass
 
     ctx = relation_context(payload.from_uid, payload.to_uid, tenant_id=get_tenant_id())
-    oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
     messages = [
         {"role": "system", "content": "You are a graph expert. Explain why the relationship exists using provided metadata."},
         {"role": "user", "content": f"Q: {payload.question}\nFrom: {ctx.get('from_title','')} ({payload.from_uid})\nTo: {ctx.get('to_title','')} ({payload.to_uid})\nRelation: {ctx.get('rel','')}\nProps: {ctx.get('props',{})}"},
     ]
 
-    try:
-        resp = await oai.chat.completions.create(model="gpt-4o-mini", messages=messages)
-    except Exception:
+    resp = await openai_chat_async(
+        messages,
+        temperature=0.2,
+        model=settings.fast_model,
+        feature="engine_relation_chat",
+        max_tokens=350,
+    )
+    if not resp.get("ok"):
         raise HTTPException(status_code=502, detail="OpenAI request failed")
+    result = {"answer": resp.get("content", ""), "usage": resp.get("usage"), "context": ctx}
 
-    usage = resp.usage or None
-    answer = resp.choices[0].message.content if resp.choices else ""
-    return {"answer": answer, "usage": (usage.model_dump() if hasattr(usage, 'model_dump') else None), "context": ctx}
+    # Cache for 4 hours
+    try:
+        await _rc.set(_rel_cache_key, json.dumps(result, ensure_ascii=False), ex=14400)
+    except Exception:
+        pass
+
+    return result
 
 # --- Roadmap ---
 
@@ -151,13 +688,57 @@ class RoadmapNode(BaseModel):
 
 class RoadmapResponse(BaseModel):
     nodes: List[RoadmapNode]
+    personalization_mode: str = "llm"
 
 @router.post("/roadmap", summary="Build adaptive roadmap", response_model=RoadmapResponse)
-async def roadmap(payload: RoadmapRequest) -> Dict:
+async def roadmap(payload: RoadmapRequest, request: Request) -> Dict:
+    _enforce_rate_limit(request, route_key="engine_roadmap", limit=30, window_sec=60)
+    attrs = payload.user_context.attributes or {}
+    user_uid = (
+        payload.user_uid
+        or attrs.get("user_uid")
+        or attrs.get("uid")
+        or attrs.get("user_id")
+    )
+    # When curriculum_code is set, use plan_route for curriculum-aware topic selection
+    if payload.curriculum_code:
+        from app.services.roadmap_planner import plan_route
+        items = plan_route(
+            subject_uid=payload.subject_uid,
+            progress=payload.current_progress or {},
+            limit=payload.limit,
+            curriculum_code=payload.curriculum_code,
+            student_tier=payload.student_tier,
+            user_uid=str(user_uid) if user_uid else None,
+        )
+        nodes = []
+        for idx, item in enumerate(items):
+            p_val = item.get("mastered", 0.0)
+            if p_val >= 0.85:
+                status = "completed"
+            elif p_val > 0:
+                status = "available"
+            elif idx == 0:
+                status = "available"
+            else:
+                status = "locked"
+            nodes.append(RoadmapNode(
+                topic_uid=item["uid"],
+                title=item["title"],
+                description=None,
+                status=status,
+                progress_percentage=p_val * 100.0,
+            ))
+        return {"nodes": nodes, "personalization_mode": "curriculum"}
+
     # Custom logic to support the "5 nodes + I/We/You Do" requirement
     subject_uid = payload.subject_uid
     progress = payload.current_progress or {}
-    
+    cache_key = _roadmap_cache_key(payload, progress)
+    cached = _roadmap_cache_get(cache_key)
+    if cached:
+        return cached
+
     # 1. Fetch Candidate Topics (limit 20 to give LLM choices)
     topics = []
     rows = []
@@ -194,7 +775,7 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             ORDER BY (CASE WHEN dist IS NULL THEN 100 ELSE dist END) ASC, t.title ASC
             LIMIT 50
             """
-            print(f"Running roadmap query for {subject_uid} with focus {focus_uid}")
+            logger.info("roadmap_query", subject_uid=subject_uid, focus_uid=focus_uid)
             rows = repo.read(query, {"su": subject_uid, "focus": focus_uid})
         else:
             # Standard query (Alphabetical / Graph order)
@@ -208,10 +789,10 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
             ORDER BY t.title ASC
             LIMIT 50
             """
-            print(f"Running roadmap query for {subject_uid}")
+            logger.info("roadmap_query", subject_uid=subject_uid)
             rows = repo.read(query, {"su": subject_uid})
             
-        print(f"Found {len(rows)} rows")
+        logger.info("roadmap_candidates", count=len(rows))
         repo.close()
 
     # 2. LLM Personalization & Description Generation
@@ -231,23 +812,23 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
     for r in rows:
         uid = r["uid"]
         score = progress.get(uid, 0.0)
+        prereqs = [str(x)[:60] for x in (r.get("prereqs", []) or [])[:3]]
+        skills = [str(x)[:60] for x in (r.get("skills", []) or [])[:3]]
         candidates_info.append({
             "uid": uid,
-            "title": r["title"],
-            "description": r.get("description") or "",
+            "title": (r["title"] or "")[:80],
+            "description": (r.get("description") or "")[:120],
             "current_score": score,
             "relationship": r.get("rel_type", "unknown"),
             "distance": r.get("dist", 100),
-            "prerequisites": r.get("prereqs", []),
-            "skills": r.get("skills", [])
+            "prerequisites": prereqs,
+            "skills": skills,
         })
 
+    personalization_mode = "llm"
     used_llm = False
     if settings.openai_api_key and candidates_info:
         try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
-            
             prompt = (
                 "You are an adaptive learning AI. Select the best 5-8 topics for a student roadmap from the list below.\n"
                 f"The student is currently focusing on topic: '{focus_title}' (UID: {focus_uid}).\n"
@@ -260,19 +841,21 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
                 "6. GENERATE a short, engaging description (in Russian) for any topic that has an empty description.\n"
                 "Return a valid JSON object with a key 'selected_topics' containing a list of objects: {'uid': '...', 'description': '...'}.\n"
                 "The list must be ordered by priority (highest priority first).\n\n"
-                f"Candidates: {json.dumps(candidates_info, ensure_ascii=False)}"
+                f"Candidates: {json.dumps(candidates_info[:12], ensure_ascii=False)}"
             )
             
-            completion = await client.chat.completions.create(
-                model="gpt-4o-mini",
+            completion = await openai_chat_async(
                 messages=[
                     {"role": "system", "content": "You are a helpful tutor assistant. Output valid JSON only."},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ],
-                response_format={"type": "json_object"}
+                temperature=0.2,
+                model=settings.fast_model,
+                feature="engine_roadmap_select",
+                max_tokens=650,
+                response_format={"type": "json_object"},
             )
-            
-            content = completion.choices[0].message.content
+            content = completion.get("content") if completion.get("ok") else None
             if content:
                 data = json.loads(content)
                 selected_items = data.get("selected_topics", [])
@@ -289,24 +872,26 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
                         selected_rows.append(r)
                 
                 used_llm = True
-                print(f"LLM selected {len(selected_rows)} topics")
-                
+                logger.info("roadmap_llm_selected", count=len(selected_rows))
+
         except Exception as e:
-            print(f"LLM Personalization failed, falling back to default order. Error: {e}")
+            personalization_mode = "fallback"
+            logger.warning("roadmap_llm_fallback", error=str(e))
 
     # Fallback if LLM failed or returned nothing
     if not selected_rows:
+        personalization_mode = "fallback"
         # Fallback Strategy:
         # 1. Always include focus topic (dist=0)
         # 2. Then closest neighbors (dist=1)
         # 3. Then others
-        
+
         # Sort rows by distance (dist=0 first)
         def sort_key(r):
             d = r.get("dist")
             if d is None: return 100
             return d
-            
+
         sorted_rows = sorted(rows, key=sort_key)
         selected_rows = sorted_rows[:8]
     else:
@@ -345,7 +930,20 @@ async def roadmap(payload: RoadmapRequest) -> Dict:
         ))
         count += 1
 
-    return {"nodes": topics}
+    result = {"nodes": topics, "personalization_mode": personalization_mode}
+    cache_ready = {
+        "nodes": [
+            n.model_dump() if hasattr(n, "model_dump") else n
+            for n in topics
+        ],
+        "personalization_mode": personalization_mode,
+    }
+    _roadmap_cache_set(cache_key, cache_ready)
+    try:
+        track_event("kb_roadmap_generated", {"subject_uid": subject_uid, "nodes_count": len(topics)})
+    except Exception:
+        pass
+    return result
 
 # --- Knowledge / Topics ---
 
@@ -367,6 +965,7 @@ class TopicsAvailableRequest(BaseModel):
     curriculum_code: Optional[str] = None
     goal_type: Optional[GoalType] = None
     exam_type: Optional[ExamType] = None
+    ignore_user_class_filter: bool = False
 
     @field_validator('exam_type', mode='before')
     @classmethod
@@ -398,54 +997,67 @@ def _age_to_class(age: Optional[int]) -> int:
         return 11
     return a - 6
 
-def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: TopicsAvailableRequest, resolved: int) -> List[Dict]:
+def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: TopicsAvailableRequest, resolved: int, student_tier: str = "standard") -> List[Dict]:
     results = []
     for r in rows or []:
         mn = r.get("user_class_min")
         mx = r.get("user_class_max")
-        
+
         include = True
-        
+
         # Curriculum Whitelist Check
         if allowed_topics is not None and r.get("topic_uid") not in allowed_topics:
             include = False
-        
+
         if include:
             # Goal / Class Filtering
-            
+
             try:
                 mn_val = int(mn) if mn is not None else None
                 mx_val = int(mx) if mx is not None else None
-                
+
                 is_exam = payload.goal_type == GoalType.exam
-                
-                if is_exam:
-                    # Memory 01KG0022Y97B03DEJ3W11AA854: 
+                ignore_user_class_filter = payload.ignore_user_class_filter
+
+                # Olympiad tier: no grade restrictions at all
+                if student_tier == "olympiad":
+                    pass  # skip all grade-based filtering
+                elif ignore_user_class_filter:
+                    pass
+                elif is_exam:
+                    # Memory 01KG0022Y97B03DEJ3W11AA854:
                     # Filters topics by curriculum grade limits for exams (OGE<=9, EGE<=11).
                     exam_limit = 11 # Default to 11
                     if payload.exam_type == ExamType.oge:
                         exam_limit = 9
-                    
+
+                    # Advanced/gifted: allow higher exam topics (+2 grades)
+                    if student_tier in ("advanced", "gifted"):
+                        exam_limit = min(exam_limit + 2, 11)
+
                     # Filter 1: Exclude topics that start AFTER the exam limit
                     if mn_val is not None and mn_val > exam_limit:
                         include = False
-                    
+
                     # Filter 2: Exclude topics that start AFTER the user's current class
                     # (Prevent 3rd grader from seeing 7th grade topics, even if for OGE)
                     # Skip this check if resolved class is 0 (undefined/admin)
                     if mn_val is not None and resolved > 0 and resolved < mn_val:
                         include = False
-                        
+
                     # Note: We intentionally ALLOW topics where resolved > mx_val (Reviewing past material)
-                    
+
                 else:
                     # Default logic (study_topics, homework, improve_grade)
                     # Filters topics by user class
                     if mn_val is not None and resolved > 0 and resolved < mn_val:
                         include = False
-                    if mx_val is not None and resolved > 0 and resolved > mx_val:
-                        include = False
-                        
+                    if mx_val is not None and resolved > 0:
+                        # Advanced/gifted: allow +2 grades above current level
+                        grade_buffer = 2 if student_tier in ("advanced", "gifted") else 0
+                        if resolved > mx_val + grade_buffer:
+                            include = False
+
             except (ValueError, TypeError):
                 pass
         
@@ -457,6 +1069,8 @@ def _filter_rows(rows: List[Dict], allowed_topics: Optional[Set[str]], payload: 
                 "user_class_max": int(mx) if isinstance(mx, (int, float)) else None,
                 "difficulty_band": r.get("difficulty_band") or "standard",
                 "prereq_topic_uids": [p for p in (r.get("prereq_topic_uids") or []) if p],
+                "subsection_uid": r.get("subsection_uid"),
+                "subsection_title": r.get("subsection_title"),
             })
     return results
 
@@ -474,28 +1088,27 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
         age = ctx.attributes.get("age")
     
     resolved = int(user_class) if user_class is not None else _age_to_class(age)
-    
+
+    # Extract student tier for ability-based filtering
+    student_tier = (ctx.attributes or {}).get("student_tier", "standard")
+
     # Curriculum Filter Preparation
     allowed_topics: Optional[Set[str]] = None
+    curriculum_root_nodes: List[str] = []
+    curriculum_node_meta_by_uid: Dict[str, Dict] = {}
     if payload.curriculum_code:
         cv = get_graph_view(payload.curriculum_code)
         if cv.get("ok") and cv.get("nodes"):
-             root_nodes = [n["canonical_uid"] for n in cv["nodes"]]
-             if root_nodes:
-                 repo_cv = Neo4jRepo()
-                 try:
-                     res_cv = repo_cv.read(
-                        "UNWIND $roots AS root MATCH (t:Topic {uid:root})-[:PREREQ*0..]->(p:Topic) RETURN collect(DISTINCT p.uid) AS uids",
-                        {"roots": root_nodes}
-                     )
-                     if res_cv and res_cv[0].get("uids"):
-                         allowed_topics = set(res_cv[0]["uids"])
-                     else:
-                         allowed_topics = set()
-                 except Exception:
-                     allowed_topics = set()
-                 finally:
-                     repo_cv.close()
+             curriculum_node_meta_by_uid = {
+                 n["canonical_uid"]: n
+                 for n in cv["nodes"]
+                 if n.get("canonical_uid")
+             }
+             curriculum_root_nodes = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
+             if curriculum_root_nodes:
+                 # Exam curricula must be a hard boundary: return only explicitly
+                 # seeded curriculum_nodes, not their PREREQ closure.
+                 allowed_topics = set(curriculum_root_nodes)
         
         if allowed_topics is None:
              # Curriculum code provided but invalid or not found -> block all
@@ -521,13 +1134,15 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "WITH t, collect(pre.uid) AS pre1 "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       pre1 AS prereq_topic_uids "
+                    "       null AS subsection_uid, null AS subsection_title, pre1 AS prereq_topic_uids "
                     "UNION "
-                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
+                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(ss:Subsection)-[:CONTAINS]->(t:Topic) "
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
-                    "WITH t, collect(pre.uid) AS pre2 "
+                    "WITH t, ss, collect(pre.uid) AS pre2 "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.uid END) AS subsection_uid, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.title END) AS subsection_title, "
                     "       pre2 AS prereq_topic_uids"
                 ),
                 {"su": su},
@@ -541,7 +1156,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                         "WITH t, collect(pre.uid) AS pre1 "
                         "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                         "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                        "       pre1 AS prereq_topic_uids "
+                        "       null AS subsection_uid, null AS subsection_title, pre1 AS prereq_topic_uids "
                         "UNION "
                         "MATCH (sub:Subject) WHERE toUpper(sub.title)=toUpper($t) "
                         "MATCH (sub)-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
@@ -553,7 +1168,7 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     ),
                     {"t": payload.subject_title},
                 )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             topics = []
@@ -566,17 +1181,19 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       collect(pre.uid) AS prereq_topic_uids "
+                    "       null AS subsection_uid, null AS subsection_title, collect(pre.uid) AS prereq_topic_uids "
                     "UNION "
-                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
+                    "MATCH (sub:Subject {uid:$su})-[:CONTAINS]->(:Section)-[:CONTAINS]->(ss:Subsection)-[:CONTAINS]->(t:Topic) "
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.uid END) AS subsection_uid, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.title END) AS subsection_title, "
                     "       collect(pre.uid) AS prereq_topic_uids"
                 ),
                 {"su": su},
             )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             ...
@@ -590,18 +1207,20 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
-                    "       collect(pre.uid) AS prereq_topic_uids "
+                    "       null AS subsection_uid, null AS subsection_title, collect(pre.uid) AS prereq_topic_uids "
                     "UNION "
                     "MATCH (sub:Subject) WHERE toUpper(sub.title)=toUpper($t) "
-                    "MATCH (sub)-[:CONTAINS]->(:Section)-[:CONTAINS]->(:Subsection)-[:CONTAINS]->(t:Topic) "
+                    "MATCH (sub)-[:CONTAINS]->(:Section)-[:CONTAINS]->(ss:Subsection)-[:CONTAINS]->(t:Topic) "
                     "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
                     "RETURN t.uid AS topic_uid, t.title AS title, t.user_class_min AS user_class_min, "
                     "       t.user_class_max AS user_class_max, t.difficulty_band AS difficulty_band, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.uid END) AS subsection_uid, "
+                    "       (CASE WHEN toLower(ss.title) CONTAINS 'general' OR toLower(ss.title) CONTAINS 'общие' THEN null ELSE ss.title END) AS subsection_title, "
                     "       collect(pre.uid) AS prereq_topic_uids"
                 ),
                 {"t": payload.subject_title},
             )
-            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved))
+            topics.extend(_filter_rows(rows, allowed_topics, payload, resolved, student_tier=student_tier))
             repo.close()
         except Exception:
             ...
@@ -618,12 +1237,112 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
                     "prereq_topic_uids": [],
                 }
             )
+
+    # Curriculum fallback: if strict curriculum filter produced no topics due missing Subject->Topic
+    # links, return ordered curriculum roots directly (still filtered by class/exam rules).
+    if not topics and payload.curriculum_code and curriculum_root_nodes:
+        try:
+            repo = Neo4jRepo()
+            rows = repo.read(
+                (
+                    "UNWIND range(0, size($uids)-1) AS idx "
+                    "WITH idx, $uids[idx] AS uid "
+                    "MATCH (t:Topic {uid:uid}) "
+                    "OPTIONAL MATCH (t)-[:PREREQ]->(pre:Topic) "
+                    "RETURN t.uid AS topic_uid, t.title AS title, "
+                    "       t.user_class_min AS user_class_min, t.user_class_max AS user_class_max, "
+                    "       t.difficulty_band AS difficulty_band, "
+                    "       null AS subsection_uid, null AS subsection_title, "
+                    "       collect(pre.uid) AS prereq_topic_uids, idx "
+                    "ORDER BY idx ASC"
+                ),
+                {"uids": curriculum_root_nodes},
+            )
+            # For curriculum fallback use curriculum roots as source of truth and keep order.
+            # Do not apply subject containment filter here: canonical topics can be outside
+            # Subject->Section edges in partially migrated graphs.
+            for r in rows or []:
+                tuid = r.get("topic_uid")
+                if not tuid:
+                    continue
+                topics.append(
+                    {
+                        "topic_uid": tuid,
+                        "title": r.get("title"),
+                        "user_class_min": int(r.get("user_class_min")) if isinstance(r.get("user_class_min"), (int, float)) else None,
+                        "user_class_max": int(r.get("user_class_max")) if isinstance(r.get("user_class_max"), (int, float)) else None,
+                        "difficulty_band": r.get("difficulty_band") or "standard",
+                        "prereq_topic_uids": [p for p in (r.get("prereq_topic_uids") or []) if p],
+                        "subsection_uid": None,
+                        "subsection_title": None,
+                    }
+                )
+            repo.close()
+        except Exception:
+            ...
+    if payload.curriculum_code and curriculum_root_nodes:
+        # The curriculum table is the source of truth for exam topic pools.
+        # Keep the seeded order, append stubs for graph-missing roots, and drop
+        # any prerequisite/subject traversal noise.
+        by_uid: Dict[str, Dict] = {}
+        for topic in topics:
+            uid = str(topic.get("topic_uid") or "").strip()
+            if uid and uid not in by_uid:
+                meta = curriculum_node_meta_by_uid.get(uid, {})
+                by_uid[uid] = {
+                    **topic,
+                    "order_index": meta.get("order_index", topic.get("order_index")),
+                    "exam_task_number": meta.get(
+                        "exam_task_number",
+                        topic.get("exam_task_number"),
+                    ),
+                }
+
+        missing_uids = [uid for uid in curriculum_root_nodes if uid and uid not in by_uid]
+        missing_titles: Dict[str, str] = {}
+        if missing_uids:
+            try:
+                repo = Neo4jRepo()
+                rows = repo.read(
+                    "UNWIND $uids AS uid OPTIONAL MATCH (t:Topic {uid:uid}) RETURN uid, t.title AS title",
+                    {"uids": missing_uids},
+                )
+                missing_titles = {
+                    str(r.get("uid")): str(r.get("title") or r.get("uid"))
+                    for r in rows or []
+                    if r.get("uid")
+                }
+                repo.close()
+            except Exception:
+                missing_titles = {}
+
+        ordered_topics: List[Dict] = []
+        for uid in curriculum_root_nodes:
+            if not uid:
+                continue
+            ordered_topics.append(
+                by_uid.get(uid)
+                or {
+                    "topic_uid": uid,
+                    "title": missing_titles.get(uid) or uid,
+                    "user_class_min": None,
+                    "user_class_max": None,
+                    "difficulty_band": "standard",
+                    "prereq_topic_uids": [],
+                    "subsection_uid": None,
+                    "subsection_title": None,
+                    "order_index": curriculum_node_meta_by_uid.get(uid, {}).get("order_index"),
+                    "exam_task_number": curriculum_node_meta_by_uid.get(uid, {}).get("exam_task_number"),
+                }
+            )
+        topics = ordered_topics
     return {"items": topics, "meta": {"subject_uid": su or payload.subject_uid, "resolved_user_class": resolved}}
 
 # --- Adaptive Questions ---
 
 class AdaptiveQuestionsInput(BaseModel):
     subject_uid: Optional[str] = None
+    user_uid: Optional[str] = None
     progress: Dict[str, float]
     count: int = 10
     difficulty_min: int = 1
@@ -633,7 +1352,13 @@ class AdaptiveQuestionsInput(BaseModel):
 @router.post("/adaptive_questions", summary="Get adaptive questions", response_model=StandardResponse)
 async def adaptive_questions(payload: AdaptiveQuestionsInput) -> Dict:
     tid = get_tenant_id()
-    roadmap_items = plan_route(payload.subject_uid, payload.progress, limit=payload.count * 3, tenant_id=tid)
+    roadmap_items = plan_route(
+        payload.subject_uid,
+        payload.progress,
+        limit=payload.count * 3,
+        tenant_id=tid,
+        user_uid=payload.user_uid,
+    )
     topic_uids = [it["uid"] for it in roadmap_items] or all_topic_uids_from_examples()
     examples = select_examples_for_topics(
         topic_uids=topic_uids,
@@ -645,21 +1370,52 @@ async def adaptive_questions(payload: AdaptiveQuestionsInput) -> Dict:
     )
     return {"items": examples, "meta": {}}
 
+# --- Test-Out Questions ---
+
+class TestOutQuestionsInput(BaseModel):
+    topic_uid: str
+    difficulty_min: int = 7
+    limit: int = 5
+
+@router.post("/test-out-questions", summary="Get high-difficulty questions for test-out", response_model=StandardResponse)
+async def test_out_questions(payload: TestOutQuestionsInput) -> Dict:
+    """Select high-difficulty questions for test-out assessment.
+
+    Used by advanced students to prove topic mastery and skip ahead.
+    """
+    tid = get_tenant_id()
+    questions = select_test_out_questions(
+        topic_uid=payload.topic_uid,
+        difficulty_min=payload.difficulty_min,
+        limit=payload.limit,
+        tenant_id=tid,
+    )
+    return {"items": questions, "meta": {"topic_uid": payload.topic_uid, "difficulty_min": payload.difficulty_min}}
+
 # --- Reasoning / Gaps ---
 
 class GapsRequest(BaseModel):
     subject_uid: str
+    user_uid: Optional[str] = None
     progress: Dict[str, float] = Field(default_factory=dict)
     goals: Optional[List[str]] = None
     prereq_threshold: float = 0.7
 
 @router.post("/gaps", response_model=StandardResponse)
 async def gaps(req: GapsRequest):
-    res = compute_gaps(req.subject_uid, req.progress, req.goals, req.prereq_threshold)
+    res = compute_gaps(
+        req.subject_uid,
+        req.progress,
+        req.goals,
+        req.prereq_threshold,
+        user_uid=req.user_uid,
+        tenant_id=get_tenant_id(),
+    )
     return {"items": [], "meta": res}
 
 class NextBestRequest(BaseModel):
     subject_uid: str
+    user_uid: Optional[str] = None
     progress: Dict[str, float] = Field(default_factory=dict)
     prereq_threshold: float = 0.7
     top_k: int = 5
@@ -668,7 +1424,16 @@ class NextBestRequest(BaseModel):
 
 @router.post("/next-best-topic", response_model=StandardResponse)
 async def next_best_topic(req: NextBestRequest):
-    res = next_best_topics(req.subject_uid, req.progress, req.prereq_threshold, req.top_k, req.alpha, req.beta)
+    res = next_best_topics(
+        req.subject_uid,
+        req.progress,
+        req.prereq_threshold,
+        req.top_k,
+        req.alpha,
+        req.beta,
+        user_uid=req.user_uid,
+        tenant_id=get_tenant_id(),
+    )
     return {"items": res["items"], "meta": {}}
 
 class MasteryUpdateRequest(BaseModel):
@@ -681,6 +1446,10 @@ class MasteryUpdateRequest(BaseModel):
 @router.post("/mastery/update", response_model=StandardResponse)
 async def mastery_update(req: MasteryUpdateRequest):
     res = update_mastery(req.prior_mastery, req.score, req.confidence)
+    try:
+        track_event("kb_mastery_updated", {"entity_uid": req.entity_uid, "new_mastery": res.get("posterior_mastery", 0)})
+    except Exception:
+        pass
     return {"items": [{"uid": req.entity_uid, "kind": req.kind, **res}], "meta": {}}
 
 
@@ -726,6 +1495,7 @@ class StartRequest(BaseModel):
     user_context: UserContext
     goal_type: Optional[GoalType] = None
     curriculum_code: Optional[str] = None
+    exam_type: Optional[ExamType] = None
 
 class OptionDTO(BaseModel):
     option_uid: str
@@ -762,6 +1532,7 @@ class AnswerDTO(BaseModel):
 class ClientMeta(BaseModel):
     time_spent_ms: Optional[int] = None
     attempt: Optional[int] = None
+    current_difficulty: Optional[int] = None  # API's time-aware difficulty seed (1–10)
 
 class NextRequest(BaseModel):
     assessment_session_id: str
@@ -773,18 +1544,27 @@ def _get_session(sid: str) -> Optional[Dict]:
     try:
         r = get_redis()
         val = r.get(f"sess:{sid}")
-        return json.loads(val) if val else None
+        if not val:
+            return None
+        try:
+            raw = zlib.decompress(base64.b64decode(val)).decode("utf-8")
+            return json.loads(raw)
+        except Exception:
+            # Backward-compat: old sessions stored as plain JSON
+            return json.loads(val)
     except Exception as e:
-        print(f"Error getting session {sid}: {e}")
+        logger.warning("session_get_error", session_id=sid, error=str(e))
         return None
 
 def _save_session(sid: str, data: Dict) -> bool:
     try:
         r = get_redis()
-        r.setex(f"sess:{sid}", 86400, json.dumps(data))
+        raw = json.dumps(data, ensure_ascii=False)
+        compressed = base64.b64encode(zlib.compress(raw.encode("utf-8"), level=6)).decode("ascii")
+        r.setex(f"sess:{sid}", 86400, compressed)
         return True
     except Exception as e:
-        print(f"Error saving session {sid}: {e}")
+        logger.warning("session_save_error", session_id=sid, error=str(e))
         return False
 
 def _resolve_level(uc: UserContext) -> int:
@@ -848,7 +1628,140 @@ def _topic_accessible(subject_uid: str, topic_uid: str, resolved_level: int, goa
         return True
 
 
+def _parse_llm_json_safely(content: str) -> dict:
+    """Parse LLM JSON with tolerance to invalid backslash escapes."""
+    if not isinstance(content, str):
+        raise ValueError("LLM content is not a string")
+
+    text = content.strip()
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0]
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0]
+    text = text.strip()
+
+    candidates = [text]
+
+    # Braces-only candidate if model wrapped with extra prose.
+    l = text.find("{")
+    r = text.rfind("}")
+    if l != -1 and r != -1 and r > l:
+        candidates.append(text[l : r + 1])
+
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError:
+            # Fix invalid escapes like "\(" or "\q"
+            fixed = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", cand)
+            if fixed != cand:
+                try:
+                    return json.loads(fixed)
+                except json.JSONDecodeError:
+                    pass
+
+    # Re-raise with original parser error for upstream retry logic
+    return json.loads(text)
+
+
+def _is_rate_limited_llm_error(value: Any) -> bool:
+    text = str(value or "").lower()
+    return (
+        "openai_rate_limited" in text
+        or "openai_rate_limited_cooldown" in text
+        or "429" in text
+        or "too many requests" in text
+        or "rate limit" in text
+    )
+
+
+# ---------------------------------------------------------------------------
+# Question cache (Redis LIST per topic+difficulty_bucket, TTL=24h)
+# Saves 60-70% of LLM calls for popular topics.
+# ---------------------------------------------------------------------------
+
+_q_cache_client: Any = None
+
+
+def _get_q_cache_client():
+    global _q_cache_client
+    if _q_cache_client is None:
+        import redis.asyncio as aioredis
+        _q_cache_client = aioredis.Redis.from_url(str(settings.redis_url), decode_responses=True)
+    return _q_cache_client
+
+
+def _q_difficulty_bucket(difficulty: int) -> int:
+    """Map 1-10 difficulty to a 0-3 bucket for cache key grouping."""
+    return max(0, (difficulty - 1) // 3)
+
+
+async def _q_cache_get(topic_uid: str, difficulty: int, exclude_uids: set) -> Dict | None:
+    """Return a cached question not already seen by this student, or None."""
+    try:
+        r = _get_q_cache_client()
+        key = f"q_cache:{topic_uid}:{_q_difficulty_bucket(difficulty)}"
+        items = await r.lrange(key, 0, -1)
+        for item in items:
+            q = json.loads(item)
+            if q.get("question_uid") not in exclude_uids:
+                return q
+    except Exception:
+        pass
+    return None
+
+
+async def _q_cache_store(topic_uid: str, difficulty: int, question: Dict) -> None:
+    """Append a generated question to the Redis cache pool."""
+    try:
+        r = _get_q_cache_client()
+        key = f"q_cache:{topic_uid}:{_q_difficulty_bucket(difficulty)}"
+        await r.rpush(key, json.dumps(question))
+        await r.expire(key, 86400)  # 24-hour TTL
+    except Exception:
+        pass
+
+
+def _try_eval_function_at_point(question_text: str) -> float | None:
+    """Attempt to evaluate y = f(x) at a given x from question text.
+
+    Detects patterns like 'y = x^2 - 4 ... x = 2' and returns the expected
+    numeric value using Python eval (restricted scope, no imports).
+    Returns None if not applicable or evaluation fails.
+    """
+    text = (question_text or "").replace("^", "**")
+    # Find variable assignment like 'x = 2' or 'при x = 2'
+    m_assign = re.search(r"\bx\s*=\s*([-+]?\d+(?:[.,]\d+)?)\b", text)
+    if not m_assign:
+        return None
+    try:
+        x_val = float(m_assign.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+    # Find function definition like 'y = <expr>' or 'f(x) = <expr>'
+    m_func = re.search(r"(?:y|f\s*\(\s*x\s*\))\s*=\s*([^=.?!,;:\n]+)", text)
+    if not m_func:
+        return None
+    expr = m_func.group(1).strip()
+    # Skip if the match is just the assignment itself (e.g. 'y = 0')
+    if re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", expr):
+        return None
+    # Restrict eval: only allow math ops and 'x'
+    allowed_names = {"x": x_val, "abs": abs}
+    try:
+        result = eval(expr, {"__builtins__": {}}, allowed_names)  # noqa: S307
+        return float(result)
+    except Exception:
+        return None
+
+
 async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: bool = False, previous_prompts: List[str] = [], difficulty: int = 5) -> Dict:
+    # 0. Cache check — skips Neo4j + LLM for 60-70% of requests
+    cached = await _q_cache_get(topic_uid, difficulty, exclude_uids)
+    if cached is not None:
+        return cached
+
     # 1. Get Topic Context (Title, Description, Prerequisites, Subject, Skills)
     repo = None
     topic_context = {
@@ -856,7 +1769,8 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         "description": "",
         "prereqs": [],
         "subject": "",
-        "skills": []
+        "skills": [],
+        "methods": [],
     }
     
     try:
@@ -866,12 +1780,14 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
             MATCH (t:Topic {uid: $uid})
             OPTIONAL MATCH (t)-[:PREREQ]->(p:Topic)
             OPTIONAL MATCH (t)-[:REQUIRES_SKILL]->(s:Skill)
+            OPTIONAL MATCH (s)-[:HAS_METHOD]->(m:Method)
             OPTIONAL MATCH (sub:Subject)-[:CONTAINS*]->(t)
-            RETURN 
-                t.title as title, 
-                t.description as description, 
-                collect(DISTINCT p.title) as prereqs, 
+            RETURN
+                t.title as title,
+                t.description as description,
+                collect(DISTINCT p.title) as prereqs,
                 collect(DISTINCT {title: s.title, definition: s.definition}) as skills,
+                collect(DISTINCT m.title) as methods,
                 head(collect(sub.title)) as subject
             """
             res = tx.run(query, uid=topic_uid)
@@ -882,7 +1798,8 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                     "description": rec["description"] or "",
                     "prereqs": [p for p in rec["prereqs"] if p],
                     "subject": rec["subject"] or "",
-                    "skills": [s for s in rec["skills"] if s and s.get("title")]
+                    "skills": [s for s in rec["skills"] if s and s.get("title")],
+                    "methods": [m for m in rec["methods"] if m],
                 }
             return None
         
@@ -913,14 +1830,42 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
         if any(k in topic_title.lower() for k in visual_keywords):
             is_visual = True
 
+    # Auto-detect calculation/probability topics
+    # User feedback: Probability tasks should use free_text/numeric, not single_choice
+    is_calculation = False
+    if topic_title:
+        calc_keywords = [
+            "probability", "вероятность", "veroyatnost",
+            "combinatorics", "комбинаторика",
+            "equation", "уравнение",
+            "solve", "решить", "найдите", "calculate", "вычисли"
+        ]
+        if any(k in topic_title.lower() for k in calc_keywords):
+            is_calculation = True
+
     # 2. Choose Type
     if is_visual:
         # Prefer structured types for visual tasks to avoid "free_text" complaints
         q_types = ["single_choice", "single_choice", "numeric"]
+    elif is_calculation:
+        # Prioritize free_text/numeric for calculation tasks to prevent guessing
+        q_types = ["free_text", "free_text", "numeric"]
     else:
-        q_types = ["single_choice", "single_choice", "numeric", "free_text", "boolean"]
+        q_types = ["single_choice", "single_choice", "single_choice", "free_text"]
     
     q_type = random.choice(q_types)
+
+    # Check for multiple correct answers scenarios (e.g. roots of quadratic equation)
+    # If the topic suggests multiple roots (e.g. "quadratic", "roots", "equation"),
+    # we should prefer "multiple_choice" or handle "free_text" carefully.
+    # Currently we don't have "multiple_choice" (checkboxes) in the frontend well-supported in this flow,
+    # but "single_choice" with a pair is possible (e.g. "2 and 3").
+    
+    # Heuristic: If topic implies multiple answers, ensure options reflect that or use free text.
+    # Actually, user complained: "Cornei je dva mojet byt. Variant otveta dolzhen soderzhat dva chisla"
+    # So if it's single_choice, the correct option text should be "2 and 3" (or "2; 3").
+    
+    # We will instruct the LLM to format options correctly for multiple roots.
     
     # Map difficulty int (1-10) to description
     diff_desc = "Intermediate"
@@ -930,121 +1875,77 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     # 3. Prompt
     visual_instruction = ""
     if is_visual:
-        visual_instruction = """
-    Visualization Requirements:
-    - You MUST set "is_visual": true.
-    - You MUST include a "visualization" object.
-    - Canvas: 8x8 grid. Coordinates x:[0,8], y:[0,8].
-    - Center objects at (5,5). Max 3 objects.
-    - "visualization" structure:
-      {
-        "type": "geometric_shape" | "graph" | "diagram",
-        "coordinates": [ 
-            // Array of shape objects. ALWAYS use array of objects.
-            { "type": "polygon", "points": [{"x":..., "y":...}], "label": "ABC", "color": "..." },
-            { "type": "line", "points": [{"x":..., "y":...}], "label": "a" },
-            { "type": "point", "x": ..., "y": ..., "label": "B", "color": "red" }
-        ],
-        "indicators": [
-            { "type": "dimension", "start": {"x":..., "y":...}, "end": {"x":..., "y":...}, "text": "5 cm" }
-        ]
-      }
-    - CRITICAL: For single points (like "Point B"), USE "type": "point" with "x", "y" directly. DO NOT use "type": "line" for a point!
-    - CRITICAL: For FUNCTIONS and CURVES (e.g. parabolas, circles, sine waves):
-      - USE "type": "line" (or "path").
-      - MUST generate AT LEAST 10-20 points to make the curve look smooth. 
-      - DO NOT use "type": "polygon" for open curves (like parabolas).
-      - Example Parabola: [{"x": -3, "y": 9}, {"x": -2, "y": 4}, {"x": -1, "y": 1}, {"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 4}, {"x": 3, "y": 9}]
-    - CRITICAL: Coordinates MUST be mathematically consistent with the problem statement values.
-    - ACCURACY RULE: If the problem involves a function (e.g. y = 2x - 1), YOU MUST CALCULATE the y-coordinates correctly for the given x-coordinates.
-      Example: If y = 2x - 1 and x = 3, then y MUST be 5.
-    - PREFERENCE: Use integer coordinates (e.g. x=2, y=3) or simple decimals (x=2.5) to avoid precision errors. DO NOT use long random floats.
-    """
+        visual_instruction = (
+            'If visual: set "is_visual": true and include visualization.\n'
+            'Types: graph/functions, geometric_shape/polygons, table, diagram.\n'
+            "For graph use formulas only (no coordinates), valid python expr with x.\n"
+            "For geometric_shape coordinates x,y must be integers in [-7,7], max 3 objects."
+        )
 
     avoid_context = ""
     if previous_prompts:
-        # Limit to last 3 prompts to avoid context overflow, but enough to prevent immediate repetition
-        avoid_context = f"\\nIMPORTANT: DO NOT generate questions similar to the following (create something different):\\n{json.dumps(previous_prompts[-3:], ensure_ascii=False)}\\n"
+        recent = [p[:40] for p in previous_prompts[-2:]]
+        avoid_context = f"\nAvoid repeating: {'; '.join(recent)}\n"
 
     # Define JSON structure based on type to avoid duplication
     if q_type == "single_choice":
-        json_structure = f"""
-    {{
-        "prompt": "Question text",
-        "options": [
-            {{"option_uid": "opt_1", "text": "Option 1", "is_correct": true}},
-            {{"option_uid": "opt_2", "text": "Option 2", "is_correct": false}}
-        ],
-        "explanation": "Brief explanation",
-        "is_visual": {"true" if is_visual else "false"},
-        "visualization": {{ ... }}
-    }}
-    """
+        json_structure = (
+            '{"prompt":"...","options":[{"option_uid":"opt_1","text":"...","is_correct":true},'
+            '{"option_uid":"opt_2","text":"...","is_correct":false}],'
+            f'"explanation":"...","is_visual":{"true" if is_visual else "false"},'
+            '"visualization":{},"math_consistency_proof":"..."}'
+        )
     else:
         # numeric, free_text, boolean (treated as free/numeric for simplicity or needing value)
-        json_structure = f"""
-    {{
-        "prompt": "Question text",
-        "correct_value": "Answer value",
-        "explanation": "Brief explanation",
-        "is_visual": {"true" if is_visual else "false"},
-        "visualization": {{ ... }}
-    }}
-    """
+        json_structure = (
+            '{"prompt":"...","correct_value":"...","explanation":"...",'
+            f'"is_visual":{"true" if is_visual else "false"},"visualization":{{}},'
+            '"math_consistency_proof":"..."}'
+        )
 
     # Enhanced Context for LLM
-    description_text = f"Topic Description: {topic_context['description']}" if topic_context['description'] else ""
-    prereqs_text = f"Prerequisites: {', '.join(topic_context['prereqs'])}" if topic_context['prereqs'] else ""
+    desc = (topic_context['description'] or "")[:90]
+    description_text = f"Topic Description: {desc}" if desc else ""
+    prereqs_text = f"Prerequisites: {', '.join(topic_context['prereqs'][:3])}" if topic_context['prereqs'] else ""
     subject_text = f"Subject/Domain: {topic_context['subject']}" if topic_context['subject'] else ""
-    
+
     skills_text = ""
     if topic_context['skills']:
-        skills_text = "Related Skills/Methods:\n" + "\n".join([f"- {s['title']}: {s.get('definition', '')}" for s in topic_context['skills']])
+        skill_lines = [f"- {s['title']}: {(s.get('definition') or '')[:50]}" for s in topic_context['skills'][:3]]
+        skills_text = "Skills:\n" + "\n".join(skill_lines)
+    if topic_context.get('methods'):
+        methods_joined = ", ".join(topic_context['methods'][:3])
+        skills_text += f"\nMethods: {methods_joined}"
 
     prompt_text = f"""
-    Generate a unique assessment question for the topic "{topic_title}" (UID: {topic_uid}).
+    Generate ONE unique assessment question for topic "{topic_title}" (UID: {topic_uid}).
     {subject_text}
     {description_text}
     {prereqs_text}
     {skills_text}
-    
-    Context: Adaptive learning platform.
-    Target Audience: High school / University students.
-    Language: Russian.
-    
-    Difficulty Level: {difficulty}/10 ({diff_desc}).
-    - Level 1-3: Basic definition, simple recognition, 1-step problems.
-    - Level 4-7: Standard problems, application of formula, 2-step reasoning.
-    - Level 8-10: Complex problems, synthesis of concepts, edge cases, multi-step.
-    
-    CRITICAL INSTRUCTION:
-    If the topic is simple (e.g. "Multiplication Table") but the Difficulty Level is High (8-10), DO NOT generate simple questions (like "2*2"). 
-    Instead, generate complex problems involving the topic, such as:
-    - Word problems applying the concept.
-    - Reverse problems (find factors).
-    - Multi-step equations.
-    - Conceptual questions about properties (distributivity, etc.).
-    
+
+    Context: Russian school platform (ОГЭ/ЕГЭ style), grades 9-11.
+    Language: Russian only.
+    Difficulty: {difficulty}/10 ({diff_desc}).
+    Task must be self-contained, solvable on paper, and have one unambiguous answer.
+
     Question Type: {q_type}
     Is Visual Task: {is_visual}
     {visual_instruction}
     {avoid_context}
-    
-    IMPORTANT: If "Is Visual Task" is True, you MUST provide a valid "visualization" object in the JSON.
-    The "visualization" object MUST have a "type" (one of: geometric_shape, graph, diagram, chart) and "coordinates".
-    
-    IMPORTANT: If "Is Visual Task" is False, you MUST NOT refer to any pictures, figures, or drawings in the question text.
-    The question must be purely textual and solvable without any visual aid.
-    
-    Requirements:
-    - Output valid JSON only.
-    - "single_choice": 4 options, 1 correct.
-    - "numeric": Problem with specific numeric answer.
-    - "boolean": True/False statement.
-    - "free_text": Open-ended question.
-    - GRAMMAR: Use singular form for single objects (e.g. "Фигура A (синяя)", not "синие"). Match gender and number correctly.
-    - CONSISTENCY: The question text MUST match the number of objects in the visualization. If you show 4 figures, do not say "two figures".
-    
+
+    Rules:
+    - Return valid JSON only, no markdown.
+    - single_choice: exactly 4 options, exactly 1 correct.
+    - numeric: one numeric answer.
+    - free_text: short answer.
+    - If visual=false, do not reference figures.
+    - Coordinates mentioned in text must match visualization.
+    - For quadratic with two roots, include both roots in the correct answer.
+    - CRITICAL math rule: if the question asks to evaluate a function at a point (e.g. y = f(x) at x = a),
+      compute the result step-by-step BEFORE writing options. Example: y = x^2 - 4 at x = 2:
+      step 1: x^2 = 4, step 2: 4 - 4 = 0, answer = 0. Write the proof in math_consistency_proof.
+
     JSON Structure:
     {json_structure}
     """
@@ -1056,58 +1957,157 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
     content = ""
     for attempt in range(2):
         try:
-            res = await openai_chat_async(messages, temperature=0.9)
+            res = await openai_chat_async(
+                messages,
+                temperature=0.35,
+                model=settings.lesson_model,
+                feature="assessment_question_generate",
+                max_tokens=520,
+                response_format={"type": "json_object"},
+            )
             if not res.get("ok"):
-                 raise Exception("LLM generation failed")
+                err = res.get("error") or "LLM generation failed"
+                if _is_rate_limited_llm_error(err):
+                    raise HTTPException(
+                        status_code=503,
+                        detail="LLM is temporarily rate-limited. Try again shortly.",
+                    )
+                raise Exception(f"LLM generation failed: {err}")
             
             content = res.get("content", "")
             raw_content = content
             
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
+            data = _parse_llm_json_safely(content)
             
-            data = json.loads(content.strip())
-            
-            # Validation: check for visual references in text when is_visual is False
             is_vis_gen = data.get("is_visual", False)
             prompt_gen = data.get("prompt", "")
-            
-            # Regex for visual references
+
+            correction_requests: list[str] = []
+
+            # Check 1: visual references in text when is_visual is False
             visual_ref_pattern = r"(?i)(на\s+)?(рисун|чертеж|схем)(к|ке|ка|е|а|ок)|(см\.|смотри)\s+рис|изображен(ы|о|а)?|shown\s+in\s+(the\s+)?figure|see\s+figure"
-            has_visual_ref = bool(re.search(visual_ref_pattern, prompt_gen))
-            
-            if not is_vis_gen and has_visual_ref:
+            if not is_vis_gen and re.search(visual_ref_pattern, prompt_gen):
                 if attempt < 1:
-                    print(f"Retry LLM: is_visual=False but text has visual ref: {prompt_gen[:50]}...")
-                    messages.append({"role": "assistant", "content": raw_content})
-                    messages.append({"role": "user", "content": "You set 'is_visual': false, but the text refers to a figure ('drawing', 'shown', etc.). Please regenerate the question to be PURELY textual, without any reference to an image."})
-                    continue
+                    correction_requests.append(
+                        "You set 'is_visual': false but the text refers to a figure or drawing. "
+                        "Rewrite the question to be PURELY textual with no references to figures or images."
+                    )
                 else:
-                    # Second failure: Force clean up
-                    print("LLM failed consistency check twice. Stripping visual refs.")
-                    clean_prompt = re.sub(visual_ref_pattern, "", prompt_gen).strip()
-                    if clean_prompt:
-                         clean_prompt = clean_prompt[0].upper() + clean_prompt[1:]
-                    data["prompt"] = clean_prompt
-            
-            # Success
+                    # Force-strip on last attempt
+                    logger.warning("llm_visual_consistency_failed", action="stripping_refs")
+                    clean = re.sub(visual_ref_pattern, "", prompt_gen).strip()
+                    if clean:
+                        data["prompt"] = clean[0].upper() + clean[1:]
+
+            # Check 2: non-integer answer for counting questions (numeric / free_text)
+            _count_pattern = r"скольк|количеств|сколько\s+\w+|число\s+(человек|людей|учеников|студентов|предметов|деталей|задач|вариантов|дней|часов)|how\s+many"
+            if q_type in ("numeric", "free_text") and re.search(_count_pattern, prompt_gen, re.IGNORECASE):
+                cv = data.get("correct_value")
+                if cv is not None:
+                    _is_noninteger = False
+                    try:
+                        cv_str = str(cv).strip().replace(",", ".")
+                        if "/" in cv_str:
+                            parts = cv_str.split("/")
+                            val = float(parts[0]) / float(parts[1])
+                        else:
+                            val = float(cv_str)
+                        _is_noninteger = (val != int(val)) or val < 0
+                    except (ValueError, TypeError, ZeroDivisionError):
+                        pass
+                    if _is_noninteger:
+                        if attempt < 1:
+                            correction_requests.append(
+                                f"The question asks 'how many' (counting discrete items/people), "
+                                f"but the answer '{cv}' is not a positive whole integer. "
+                                "Adjust the numbers in the problem so the answer is a positive whole integer."
+                            )
+                        else:
+                            logger.warning("llm_noninteger_count_unfixed", value=cv)
+
+            # Check 3: fraction/decimal options in single_choice counting questions
+            if q_type == "single_choice" and re.search(_count_pattern, prompt_gen, re.IGNORECASE):
+                _frac_pattern = r"\d+\s*/\s*\d+|\d+[.,]\d+"
+                bad_opts = [
+                    opt.get("text", "") for opt in data.get("options", [])
+                    if re.search(_frac_pattern, str(opt.get("text", "")))
+                ]
+                if bad_opts and attempt < 1:
+                    correction_requests.append(
+                        "The question asks 'how many' (counting items), but some answer options contain "
+                        f"fractions or decimals ({', '.join(bad_opts[:2])}). "
+                        "Rewrite so every option is a positive whole integer."
+                    )
+
+            # Check 4: math correctness for function-evaluation single_choice questions.
+            # Detects 'y = f(x)' pattern and verifies the marked correct option.
+            if q_type == "single_choice" and data.get("options"):
+                expected = _try_eval_function_at_point(prompt_gen)
+                if expected is not None:
+                    correct_opts = [o for o in data["options"] if o.get("is_correct")]
+                    if correct_opts:
+                        try:
+                            marked_val = float(str(correct_opts[0].get("text", "")).strip().replace(",", "."))
+                            if abs(marked_val - expected) >= 1e-6:
+                                if attempt < 1:
+                                    correction_requests.append(
+                                        f"Math error detected: for this function-evaluation question "
+                                        f"the correct answer should be {expected:g}, but you marked "
+                                        f"'{correct_opts[0].get('text')}'. "
+                                        f"Recalculate step-by-step and fix the is_correct flags."
+                                    )
+                                else:
+                                    # Force-fix on last attempt: find the option closest to expected value
+                                    best = None
+                                    best_diff = float("inf")
+                                    for opt in data["options"]:
+                                        try:
+                                            v = float(str(opt.get("text", "")).strip().replace(",", "."))
+                                            if abs(v - expected) < best_diff:
+                                                best_diff = abs(v - expected)
+                                                best = opt
+                                        except (ValueError, TypeError):
+                                            pass
+                                    if best and best_diff < 1e-6:
+                                        for opt in data["options"]:
+                                            opt["is_correct"] = (opt is best)
+                                        logger.warning(
+                                            "llm_math_correction_forced",
+                                            expected=expected,
+                                            fixed_to=best.get("text"),
+                                        )
+                        except (ValueError, TypeError):
+                            pass
+
+            if correction_requests and attempt < 1:
+                logger.info("llm_retry_corrections", issues=len(correction_requests), preview=prompt_gen[:60])
+                messages.append({"role": "assistant", "content": raw_content})
+                messages.append({
+                    "role": "user",
+                    "content": "Fix the following issues in your response:\n" +
+                               "\n".join(f"- {r}" for r in correction_requests),
+                })
+                continue
+
+            # All checks passed (or last attempt exhausted)
             break
-            
+
         except Exception as e:
-            if attempt == 1: raise e
-            print(f"LLM parsing error: {e}, retrying...")
-            pass
-        
+            if attempt >= 1 or _is_rate_limited_llm_error(e):
+                raise e
+            logger.warning("llm_parsing_error", error=str(e), action="retrying")
+
+    # Process generated data after retry loop
+    try:
         q_uid = f"Q-GEN-{uuid.uuid4().hex[:8]}"
-        
+
         options = []
         if "options" in data and isinstance(data["options"], list):
             for i, opt in enumerate(data["options"]):
                 options.append({
                     "option_uid": opt.get("option_uid") or f"opt_{i}",
-                    "text": opt.get("text", "")
+                    "text": opt.get("text", ""),
+                    "is_correct": bool(opt.get("is_correct", False)),
                 })
         
         visualization_data = None
@@ -1126,49 +2126,103 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                     if vis_type == "chart": valid_type = VisualizationType.CHART
                     elif vis_type == "diagram": valid_type = VisualizationType.DIAGRAM
                     elif vis_type == "graph": valid_type = VisualizationType.GRAPH
-                
-                vis["type"] = valid_type.value
+                    elif vis_type == "table":
+                        # Table is a special type: pass through as-is with headers/rows
+                        visualization_data = {
+                            "type": "table",
+                            "headers": vis.get("headers", []),
+                            "rows": vis.get("rows", []),
+                            "params": vis.get("params", {}),
+                        }
+                        # Skip rest of processing for table
+                        vis_obj = None
+
+                if vis_type == "table":
+                    pass  # already handled above
+                else:
+                    vis["type"] = valid_type.value
+
+                # For GRAPH type: prefer server-side computation from formulas.
+                if valid_type == VisualizationType.GRAPH:
+                    functions = vis.get("functions")
+                    if isinstance(functions, list) and len(functions) > 0:
+                        # New path: LLM gave formulas → compute points server-side
+                        computed = GraphEngine.compute_series(functions)
+                        if computed:
+                            vis["coordinates"] = computed
+                            vis.pop("functions", None)
+                        else:
+                            logger.warning("graph_engine_no_valid_series", formulas=[f.get("formula") for f in functions])
+                            visualization_data = None
+                    else:
+                        # Legacy path: LLM gave raw coordinates → normalize flat [{x,y}] to series
+                        coords = vis.get("coordinates")
+                        if isinstance(coords, list) and len(coords) > 0:
+                            first = coords[0]
+                            if isinstance(first, dict) and "x" in first and "y" in first and "points" not in first:
+                                vis["coordinates"] = [{"type": "line", "label": "graph", "points": coords}]
+                            # Re-evaluate any series that carry a formula field
+                            vis["coordinates"] = GraphEngine.recompute_series_from_coords(vis["coordinates"])
 
                 # Integrations with GeometryEngine for valid coordinates
-                if valid_type in [VisualizationType.GEOMETRIC_SHAPE, VisualizationType.GRAPH, VisualizationType.DIAGRAM]:
+                # NOTE: GRAPH type keeps logical coordinates [-7..7] for the frontend coordinate grid.
+                # GeometryEngine normalization ([0..10] canvas space) is only for geometric_shape/diagram.
+                if valid_type in [VisualizationType.GEOMETRIC_SHAPE, VisualizationType.DIAGRAM] and vis_type != "table":
                     try:
                         coords = vis.get("coordinates")
-                        
+
                         # 1. Standardize input to list of shape objects
                         if isinstance(coords, list) and len(coords) > 0:
                             first_elem = coords[0]
                             # Detect "Mode 1" (list of points) and convert to "Mode 2" (list of shapes)
                             if isinstance(first_elem, dict) and "x" in first_elem and "y" in first_elem and "points" not in first_elem:
                                 coords = [{"type": "polygon", "points": coords, "label": "Generated"}]
-                        
+
                         # 2. Normalize to 10x10 canvas
-                        # GeometryEngine.normalize handles list of shapes
                         normalized_coords = GeometryEngine.normalize(coords)
-                        
+
                         # 3. Validate
                         GeometryEngine.validate(normalized_coords)
-                        
-                        # 4. Update visualization object
+
+                        # 4. Snap vertex labels to nearest polygon vertices (prevents floating labels)
+                        normalized_coords = [
+                            GeometryEngine.snap_labels_to_vertices(s) for s in normalized_coords
+                        ]
+
+                        # 5. Validate & relabel triangle vertices against angle constraints in question
+                        question_prompt = data.get("prompt", "")
+                        normalized_coords = GeometryEngine.validate_and_relabel_triangle(
+                            normalized_coords, question_prompt
+                        )
+
+                        # 6. Update visualization object
                         vis["coordinates"] = normalized_coords
-                        
+
                     except Exception as geo_err:
-                        print(f"GeometryEngine error (using original coords): {geo_err}")
-                        # If normalization fails, we attempt to use original coordinates if they are somewhat valid
+                        logger.warning("geometry_engine_error", error=str(geo_err), action="using_original_coords")
                         pass
 
-                # Ensure type is valid enum or string
-                vis_obj = VisualizationData(
-                    type=vis.get("type"),
-                    coordinates=vis.get("coordinates"),
-                    params=vis.get("params", {})
-                )
-                # Convert to dict for JSON serialization compatibility
-                visualization_data = vis_obj.model_dump() if hasattr(vis_obj, "model_dump") else vis_obj.dict()
+                # Table type was already handled above (visualization_data set directly)
+                if vis_type != "table":
+                    vis_obj = VisualizationData(
+                        type=vis.get("type"),
+                        coordinates=vis.get("coordinates"),
+                        params=vis.get("params", {})
+                    )
+                    # Convert to dict for JSON serialization compatibility
+                    visualization_data = vis_obj.model_dump() if hasattr(vis_obj, "model_dump") else vis_obj.dict()
             except Exception as e:
-                print(f"Visualization validation error: {e}")
+                logger.warning("visualization_validation_error", error=str(e))
                 # Fallback: ignore visualization if invalid
                 visualization_data = None
-        
+
+        # If visualization ended up with empty coordinates, discard it — frontend can't render nothing.
+        if visualization_data is not None:
+            coords = visualization_data.get("coordinates")
+            if isinstance(coords, list) and len(coords) == 0:
+                logger.warning("visualization_empty_coordinates", action="discarding")
+                visualization_data = None
+
         # Correction: If options are present, force type to single_choice
         final_type = q_type
         if options and len(options) > 0:
@@ -1201,17 +2255,22 @@ async def _generate_question_llm(topic_uid: str, exclude_uids: set, is_visual: b
                 "correct_data": correct_data
             }
         }
-        
+
+        # Store generated question in cache for future requests
+        await _q_cache_store(topic_uid, difficulty, res_q)
 
         return res_q
     except Exception as e:
-        print(f"Gen Error: {e}")
+        logger.warning("question_generation_error", error=str(e))
         # If generation fails, we raise an error instead of returning a stub
         raise HTTPException(status_code=503, detail="Unable to generate question at this time.")
 
 
-async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: int, exclude_uids: set = set(), previous_prompts: List[str] = []) -> Dict:
-    qs = select_examples_for_topics([topic_uid], limit=1, difficulty_min=difficulty_min, difficulty_max=difficulty_max, exclude_uids=exclude_uids)
+async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: int, exclude_uids: set = set(), previous_prompts: List[str] = [], method_role: str | None = None) -> Dict:
+    qs = select_examples_for_topics([topic_uid], limit=1, difficulty_min=difficulty_min, difficulty_max=difficulty_max, exclude_uids=exclude_uids, method_role=method_role)
+    # Fallback: if method_role filter returned nothing, retry without it
+    if not qs and method_role:
+        qs = select_examples_for_topics([topic_uid], limit=1, difficulty_min=difficulty_min, difficulty_max=difficulty_max, exclude_uids=exclude_uids)
     
     if qs:
         q = qs[0]
@@ -1242,16 +2301,43 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
             # Skip this legacy question and force generation
             pass
         else:
+            raw_answer = q.get("correct_answer")
+            correct_data = {"correct_value": str(raw_answer)} if raw_answer is not None else None
+
+            # Normalize visualization coordinates from DB.
+            # GRAPH type keeps logical [-7..7] coordinates (frontend draws its own axes).
+            # Only geometric_shape/diagram are normalized to [0,10] canvas space.
+            db_visualization = q.get("visualization", None)
+            if db_visualization and isinstance(db_visualization, dict):
+                vis_type_str = db_visualization.get("type", "")
+                if vis_type_str in ("geometric_shape", "diagram"):
+                    try:
+                        coords = db_visualization.get("coordinates")
+                        if isinstance(coords, list) and len(coords) > 0:
+                            first = coords[0]
+                            # Flat list of {x,y} points → wrap in a single shape object
+                            if isinstance(first, dict) and "x" in first and "y" in first and "points" not in first:
+                                coords = [{"type": "polygon", "points": coords, "label": "Figure"}]
+                            normalized = GeometryEngine.normalize(coords)
+                            db_visualization = dict(db_visualization)
+                            db_visualization["coordinates"] = normalized
+                    except Exception as geo_err:
+                        logger.warning("db_geometry_normalize_error", error=str(geo_err))
+
             return {
                 "question_uid": str(q.get("uid") or f"Q-MISSING-{topic_uid}"),
                 "subject_uid": "",
                 "topic_uid": topic_uid,
                 "type": q_type,
-                "prompt": str(q.get("statement") or q.get("title") or ""),
+                "prompt": str(q.get("statement") or ""),
                 "options": q.get("options", []),
                 "is_visual": is_q_visual,
-                "visualization": q.get("visualization", None),
-                "meta": {"difficulty": float(q.get("difficulty") or 0.5), "skill_uid": ""},
+                "visualization": db_visualization,
+                "meta": {
+                    "difficulty": float(q.get("difficulty") or 0.5),
+                    "skill_uid": "",
+                    "correct_data": correct_data,
+                },
             }
     
     # Pass target difficulty (using max as target) to generator
@@ -1262,12 +2348,21 @@ async def _select_question(topic_uid: str, difficulty_min: int, difficulty_max: 
     response_model=StandardResponse,
     responses={400: {"model": ApiError}, 404: {"model": ApiError}},
 )
-async def start(payload: StartRequest) -> Dict:
+async def start(payload: StartRequest, request: Request) -> Dict:
+    _enforce_rate_limit(request, route_key="assessment_start", limit=25, window_sec=60)
     try:
+        uc = payload.user_context or UserContext()
+        resolved = _resolve_level(uc)
+
         # Resolve topic_uid if missing (e.g. for Exam mode starting from first topic)
         if not payload.topic_uid:
             if payload.curriculum_code:
                 cv = get_graph_view(payload.curriculum_code)
+                if not cv.get("ok") or not cv.get("nodes"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid curriculum_code: {payload.curriculum_code}",
+                    )
                 if cv.get("ok") and cv.get("nodes"):
                     # Pick the first topic from the curriculum
                     # nodes are ordered by order_index
@@ -1275,20 +2370,66 @@ async def start(payload: StartRequest) -> Dict:
                         if n.get("canonical_uid"):
                             payload.topic_uid = n["canonical_uid"]
                             break
-            
+
+            # Fallback: pick the first accessible topic under subject_uid
+            if not payload.topic_uid and payload.subject_uid:
+                try:
+                    _repo = Neo4jRepo()
+                    _rows = _repo.read(
+                        "MATCH (sub:Subject {uid:$su})-[:CONTAINS*]->(t:Topic) "
+                        "WHERE (t.user_class_min IS NULL OR t.user_class_min <= $lvl) "
+                        "AND (t.user_class_max IS NULL OR t.user_class_max >= $lvl) "
+                        "RETURN t.uid AS uid ORDER BY t.user_class_min, t.uid LIMIT 1",
+                        {"su": payload.subject_uid, "lvl": resolved},
+                    )
+                    _repo.close()
+                    if _rows:
+                        payload.topic_uid = _rows[0]["uid"]
+                except Exception:
+                    pass
+
             if not payload.topic_uid:
                 raise HTTPException(status_code=400, detail="topic_uid is required (or valid curriculum_code with topics)")
-
-        uc = payload.user_context or UserContext()
-        resolved = _resolve_level(uc)
         if not _topic_accessible(payload.subject_uid, payload.topic_uid, resolved, payload.goal_type):
             raise HTTPException(status_code=404, detail="Topic not available")
         import uuid
         sid = uuid.uuid4().hex
-        first_q = await _select_question(payload.topic_uid, 3, 3, set())
+        first_q = await _select_question(payload.topic_uid, 2, 2, set(), method_role="exam")
         # Ensure subject_uid is populated in the question response
         first_q["subject_uid"] = payload.subject_uid
-        
+
+        # Build topic pool for multi-topic assessment (covers full curriculum/subject)
+        topic_pool: list = []
+        if payload.curriculum_code:
+            cv = get_graph_view(payload.curriculum_code)
+            if not cv.get("ok") or not cv.get("nodes"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid curriculum_code: {payload.curriculum_code}",
+                )
+            topic_pool = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
+        elif payload.subject_uid:
+            try:
+                exam_limit = 9 if payload.exam_type == ExamType.oge else 11
+                _repo = Neo4jRepo()
+                _rows = _repo.read(
+                    "MATCH (sub:Subject {uid: $su})-[:CONTAINS*]->(t:Topic) "
+                    "WHERE t.user_class_min IS NULL OR t.user_class_min <= $lim "
+                    "RETURN t.uid AS uid ORDER BY t.user_class_min, t.uid",
+                    {"su": payload.subject_uid, "lim": exam_limit},
+                )
+                topic_pool = [r["uid"] for r in (_rows or []) if r.get("uid")]
+                _repo.close()
+            except Exception:
+                pass
+        # Remove first topic from pool start (already used) and shuffle for variety
+        import random as _random
+        if payload.topic_uid in topic_pool:
+            topic_pool.remove(payload.topic_uid)
+        _random.shuffle(topic_pool)
+
+        # Number of questions = number of topics in curriculum (1 per topic)
+        total_topics = len(topic_pool) + 1  # +1 for the first topic already used
         sess_data = {
             "subject_uid": payload.subject_uid,
             "topic_uid": payload.topic_uid,
@@ -1300,24 +2441,33 @@ async def start(payload: StartRequest) -> Dict:
             "last_question_uid": first_q["question_uid"],
             "good": 0,
             "bad": 0,
-            "min_questions": 6,
-            "max_questions": 20,
+            "min_questions": min(7, total_topics),
+            "max_questions": total_topics,
             "target_confidence": 0.85,
             "stability_window": 4,
             "d_history": [],
+            "topic_uids_pool": topic_pool,
+            "topic_uids_ptr": 0,
+            "questions_per_topic": {payload.topic_uid: 1},
+            "max_questions_per_topic": 1,
             "question_details": {
                 first_q["question_uid"]: {
-                    "prompt": first_q["prompt"],
+                    "prompt": first_q["prompt"][:120],
                     "correct_data": first_q["meta"].get("correct_data"),
                     "options": first_q.get("options"),
                     "type": first_q.get("type"),
+                    "difficulty": first_q["meta"].get("difficulty", 5),
                 }
             }
         }
         if not _save_session(sid, sess_data):
             raise HTTPException(status_code=500, detail="Failed to initialize session storage")
-            
-        return {"items": [first_q], "meta": {"assessment_session_id": sid}}
+
+        try:
+            track_event("kb_assessment_started", {"session_id": sid, "subject_uid": payload.subject_uid, "topic_uid": payload.topic_uid})
+        except Exception:
+            pass
+        return {"items": [first_q], "meta": {"assessment_session_id": sid, "total_topics": total_topics}}
     except HTTPException:
         raise
     except Exception as e:
@@ -1329,6 +2479,128 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
     if answer is None:
         return 0.0
     
+    # Helper for parsing numeric values including fractions
+    def parse_number(val: Any) -> Optional[float]:
+        if val is None:
+            return None
+        try:
+            s = str(val).strip().replace(',', '.')
+            if '/' in s:
+                parts = s.split('/')
+                if len(parts) == 2:
+                    return float(parts[0]) / float(parts[1])
+            return float(s)
+        except:
+            return None
+
+    def normalize_text(val: Any) -> str:
+        if val is None:
+            return ""
+        s = str(val).strip().lower().replace("ё", "е")
+        # Keep letters/digits/spaces only for robust comparison.
+        s = re.sub(r"[^a-zа-я0-9\s]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def numbers_close(lhs: Any, rhs: Any) -> bool:
+        lv = parse_number(lhs)
+        rv = parse_number(rhs)
+        if lv is None or rv is None:
+            return False
+        is_close_rel = abs(lv - rv) <= 0.02 * max(abs(rv), 1.0)
+        is_close_abs = abs(lv - rv) < 0.02
+        return bool(is_close_rel or is_close_abs)
+
+    def _normalize_time_token(token: str) -> Optional[str]:
+        m = re.match(r"^\s*(\d{1,2})[:.](\d{2})\s*$", str(token))
+        if not m:
+            return None
+        hh = int(m.group(1))
+        mm = int(m.group(2))
+        if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+            return None
+        return f"{hh}:{mm:02d}"
+
+    def extract_time_tokens(val: Any) -> List[str]:
+        if val is None:
+            return []
+        text = str(val)
+        out: List[str] = []
+        for raw in re.findall(r"(?<!\d)\d{1,2}[:.]\d{2}(?!\d)", text):
+            norm = _normalize_time_token(raw)
+            if norm and norm not in out:
+                out.append(norm)
+        return out
+
+    def _canonical_number_token(raw: str) -> Optional[str]:
+        v = parse_number(raw)
+        if v is None:
+            return None
+        if abs(v) < 1e-12:
+            v = 0.0
+        s = f"{v:.10f}".rstrip("0").rstrip(".")
+        return s or "0"
+
+    def extract_numeric_tokens(val: Any) -> List[str]:
+        if val is None:
+            return []
+        text = str(val).replace("−", "-")
+        # Avoid splitting time-like values into two numbers (e.g., 9:45).
+        text = re.sub(r"(?<!\d)\d{1,2}[:.]\d{2}(?!\d)", " ", text)
+        raws = re.findall(r"[+-]?\d+(?:[.,]\d+)?(?:/[+-]?\d+(?:[.,]\d+)?)?", text)
+        out: List[str] = []
+        for tok in raws:
+            canon = _canonical_number_token(tok)
+            if canon and canon not in out:
+                out.append(canon)
+        return out
+
+    def _extract_var_assignments(val: Any) -> Set[tuple]:
+        if val is None:
+            return set()
+        trans = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+        text = str(val).translate(trans).replace("−", "-")
+        pairs = set()
+        for var, raw_num in re.findall(
+            r"([a-zа-я])(?:\s*[_]?\s*\d+)?\s*=\s*([+-]?\d+(?:[.,]\d+)?(?:/[+-]?\d+(?:[.,]\d+)?)?)",
+            text.lower(),
+        ):
+            canon = _canonical_number_token(raw_num)
+            if canon is not None:
+                pairs.add((var, canon))
+        return pairs
+
+    def _final_answer_segment(correct_text: str) -> str:
+        if not correct_text:
+            return ""
+        m = re.search(
+            r"(?:^|\s)(?:ответ|answer)\s*[:\-]\s*(.+)$",
+            correct_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            return m.group(1).strip()
+        parts = [p.strip() for p in re.split(r"[.\n;]+", correct_text) if p and p.strip()]
+        return parts[-1] if parts else correct_text
+
+    def parse_bool(val: Any) -> Optional[bool]:
+        s = normalize_text(val)
+        if not s:
+            return None
+        true_tokens = {"true", "верно", "да", "истина", "правда"}
+        false_tokens = {"false", "неверно", "нет", "ложь"}
+
+        words = set(s.split())
+        if words & true_tokens:
+            return True
+        if words & false_tokens:
+            return False
+        if s in {"1", "+"}:
+            return True
+        if s in {"0", "-"}:
+            return False
+        return None
+
     # 1. Check Single Choice (Option UIDs)
     if answer.selected_option_uids:
         if not question_data or not question_data.get("options"):
@@ -1348,22 +2620,23 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
         return 1.0 if selected == correct_uids else 0.0
 
     # 2. Check Numeric (Value)
-    if answer.value is not None:
+    # Skip if text is provided (text answer takes priority over the sentinel value: 0 sent by frontend)
+    if answer.value is not None and not answer.text:
         try:
-            user_val = float(answer.value)
+            user_val = parse_number(answer.value)
+            if user_val is None:
+                return 0.0
+
             # Try to find correct value in correct_data
             correct_val = None
             if question_data and question_data.get("correct_data"):
                 cd = question_data["correct_data"]
                 if "correct_value" in cd:
-                    correct_val = float(cd["correct_value"])
+                    correct_val = parse_number(cd["correct_value"])
             
             if correct_val is not None:
-                # Allow small epsilon error
-                return 1.0 if abs(user_val - correct_val) < 1e-6 else 0.0
+                return 1.0 if numbers_close(user_val, correct_val) else 0.0
             
-            # Fallback if no correct value known: assume correct if non-zero? No, unsafe.
-            # But for now, let's return 0.0 if we can't verify.
             return 0.0
         except Exception:
             return 0.0
@@ -1373,102 +2646,210 @@ def _evaluate(answer: AnswerDTO, question_data: Dict = None) -> float:
         text = str(answer.text).strip()
         if len(text) < 1:
             return 0.0
-            
+
+        normalized_user_text = normalize_text(text)
+        if normalized_user_text in {"idk", "i dont know", "не знаю", "я не знаю", "__idk__"}:
+            return 0.0
+
         # Try to match with correct_value if exists
         if question_data and question_data.get("correct_data"):
             cd = question_data["correct_data"]
-            correct_text = str(cd.get("correct_value", "")).strip().lower()
-            if correct_text:
-                # Basic fuzzy match
-                if text.lower() == correct_text:
+            correct_val = None
+            if isinstance(cd, dict):
+                correct_val = cd.get("correct_value")
+                if correct_val is None:
+                    correct_val = cd.get("correct_answer")
+                if correct_val is None:
+                    correct_val = cd.get("answer")
+
+            correct_val_str = str(correct_val).strip() if correct_val is not None else ""
+            if not correct_val_str:
+                return 0.0
+
+            normalized_correct_text = normalize_text(correct_val_str)
+
+            # 0. Semantic boolean match for "верно/неверно", "да/нет", true/false.
+            user_bool = parse_bool(text)
+            correct_bool = parse_bool(correct_val_str)
+            if user_bool is not None and correct_bool is not None:
+                return 1.0 if user_bool == correct_bool else 0.0
+
+            # 1. Exact/Fuzzy string match
+            if normalized_user_text == normalized_correct_text:
+                return 1.0
+            if len(normalized_user_text) >= 6 and (
+                normalized_user_text in normalized_correct_text
+                or normalized_correct_text in normalized_user_text
+            ):
+                return 1.0
+
+            # 2. Variable assignment equivalence (x=2, y=3 forms)
+            user_assign = _extract_var_assignments(text)
+            correct_assign = _extract_var_assignments(correct_val_str)
+            if user_assign and correct_assign:
+                return 1.0 if user_assign.issubset(correct_assign) else 0.0
+
+            # 3. Time equivalence (9:45 == 9.45 in this context)
+            user_times = extract_time_tokens(text)
+            correct_times = extract_time_tokens(correct_val_str)
+            if user_times and correct_times:
+                return 1.0 if set(user_times).issubset(set(correct_times)) else 0.0
+
+            # 4. Numeric comparison (including multi-number answers)
+            user_nums = extract_numeric_tokens(text)
+            if user_nums:
+                answer_segment = _final_answer_segment(correct_val_str)
+                seg_nums = extract_numeric_tokens(answer_segment)
+                corr_nums = extract_numeric_tokens(correct_val_str)
+
+                # Single-number user answers: compare with explicit/final answer number.
+                if len(user_nums) == 1:
+                    user_num = user_nums[0]
+                    candidate_nums: List[str] = []
+                    if "=" in answer_segment:
+                        candidate_nums.extend(extract_numeric_tokens(answer_segment.split("=")[-1]))
+                    if seg_nums:
+                        candidate_nums.append(seg_nums[-1])
+                    if not candidate_nums and corr_nums:
+                        candidate_nums.append(corr_nums[-1])
+                    for candidate in candidate_nums:
+                        if numbers_close(user_num, candidate):
+                            return 1.0
+                    return 0.0
+
+                # Multi-number answers (sets of roots/angles/etc.)
+                user_set = set(user_nums)
+                if seg_nums and user_set.issubset(set(seg_nums)):
                     return 1.0
-                # If correct answer is numeric but user sent text
-                try:
-                    if float(text) == float(correct_text):
+                prompt_txt = str((question_data or {}).get("prompt") or "")
+                if re.search(r"\b(все|остальные|найдите все|перечислите)\b", normalize_text(prompt_txt)):
+                    if user_set.issubset(set(corr_nums)):
                         return 1.0
-                except:
-                    pass
-                return 0.0 # Mismatch
-        
-        # If no correct data available (legacy/fallback), 
-        # DO NOT return 1.0 just for length. It allows "nonsense".
-        # Return 0.0 or mark for manual review.
+                return 0.0
+
         return 0.0
 
     return 0.0
 
 def _confidence(sess: Dict) -> float:
-    asked = len(sess["asked"])
-    w = sess["stability_window"]
-    h = sess["d_history"][-w:] if w > 0 else sess["d_history"]
-    if not h:
-        return 0.0
-    stable = 1.0 if max(h) - min(h) <= 1 else 0.0
-    base = min(1.0, asked / max(1, sess["min_questions"]))
-    return max(0.0, min(1.0, 0.6 * base + 0.4 * stable))
+    from app.services.reasoning.bayesian_confidence import difficulty_weighted_bayesian
 
-async def _next_question(sess: Dict) -> Optional[Dict]:
+    asked_uids = sess.get("asked", [])
+    q_details = sess.get("question_details", {})
+
+    answers = []
+    for uid in asked_uids:
+        qd = q_details.get(uid, {})
+        score = float(qd.get("score", 0.0))
+        diff = float(qd.get("difficulty", 5.0))
+        answers.append({"correct": score >= 0.5, "difficulty": diff})
+
+    if not answers:
+        return 0.0
+
+    result = difficulty_weighted_bayesian(
+        answers,
+        variance_threshold=0.02,
+    )
+    return max(0.0, min(1.0, result["confidence"]))
+
+async def _next_question(sess: Dict, difficulty_hint: Optional[int] = None) -> Optional[Dict]:
+    """Select the next question at the difficulty determined by StudyNinja-API.
+
+    Adaptive difficulty is owned by the API backend (diagnostic_service.adapt_difficulty).
+    KB receives the target difficulty via difficulty_hint and simply serves a question at
+    that level — no internal adaptation.  d_history is preserved for scoring only.
+    """
     good = sess["good"]
     bad = sess["bad"]
     if len(sess["asked"]) >= sess["max_questions"]:
         return None
-    d_last = sess["d_history"][-1] if sess["d_history"] else 3
-    
-    # Adaptive Logic: Adjust difficulty based on the LAST answer specifically
-    # User feedback: "If I answered wrong, give easier question."
-    
-    last_q_uid = sess["asked"][-1] if sess["asked"] else None
-    last_score = 0.0
-    # Retrieve score of the last question if available
-    if last_q_uid and "question_details" in sess and last_q_uid in sess["question_details"]:
-        last_score = sess["question_details"][last_q_uid].get("score", 0.0)
-    
-    # Determine new difficulty
-    if last_score >= 0.5:
-        # Correct answer -> Increase difficulty
-        d = min(10, d_last + 1)
-    else:
-        # Incorrect answer -> Decrease difficulty
-        d = max(1, d_last - 1)
-        
+
+    # Fixed difficulty = 2 for exam diagnostic (medium, method_role=exam examples)
+    d = 2
+
     sess["d_history"].append(d)
-    
-    try:
+
+    # Multi-topic rotation: switch topic after max_questions_per_topic questions on current topic
+    topic_uid = sess["topic_uid"]
+    topic_pool = sess.get("topic_uids_pool", [])
+    if topic_pool:
+        qpt = sess.setdefault("questions_per_topic", {})
+        max_per = sess.get("max_questions_per_topic", 2)
+        if qpt.get(topic_uid, 0) >= max_per:
+            ptr = sess.get("topic_uids_ptr", 0)
+            rotated = False
+            while ptr < len(topic_pool):
+                candidate = topic_pool[ptr]
+                ptr += 1
+                if qpt.get(candidate, 0) < max_per:
+                    sess["topic_uid"] = candidate
+                    sess["topic_uids_ptr"] = ptr
+                    topic_uid = candidate
+                    rotated = True
+                    break
+            if not rotated:
+                # All pool topics exhausted — reset pointer and retry rotation.
+                sess["topic_uids_ptr"] = 0
+
+    # Track questions per topic
+    qpt = sess.setdefault("questions_per_topic", {})
+    qpt[topic_uid] = qpt.get(topic_uid, 0) + 1
+
+    async def _select_non_duplicate(min_d: int, max_d: int, blocked_uids: Set[str]) -> Optional[Dict]:
         previous_prompts = sess.get("asked_prompts", [])
-        q = await _select_question(sess["topic_uid"], d, d, set(sess["asked"]), previous_prompts=previous_prompts)
+        local_blocked = set(blocked_uids)
+        for _ in range(1):
+            candidate = await _select_question(
+                topic_uid,
+                min_d,
+                max_d,
+                local_blocked,
+                previous_prompts=previous_prompts,
+                method_role="exam",
+            )
+            if not candidate:
+                return None
+            cand_uid = str(candidate.get("question_uid") or "").strip()
+            if cand_uid and cand_uid not in blocked_uids:
+                return candidate
+            if cand_uid:
+                local_blocked.add(cand_uid)
+        return None
+
+    asked_uids = set(sess.get("asked", []))
+    try:
+        q = await _select_non_duplicate(d, d, asked_uids)
     except Exception as e:
-        print(f"Error selecting question: {e}")
-        # Try fallback to standard difficulty if specific difficulty fails
+        logger.warning("question_selection_error", error=str(e))
+        # Try fallback to broader difficulty range if exact difficulty fails
         try:
-            previous_prompts = sess.get("asked_prompts", [])
-            q = await _select_question(sess["topic_uid"], 3, 3, set(sess["asked"]), previous_prompts=previous_prompts)
+            q = await _select_non_duplicate(1, 3, asked_uids)
         except Exception:
             q = None
 
     if not q:
-        # If still no question, return None to signal end or error?
-        # Better to return None and let the loop handle it, but wait,
-        # next_question expects a question.
-        # If we can't find a question, maybe we should stop the session?
         return None
 
     # Ensure subject_uid is populated in the question response
     if q:
         q["subject_uid"] = sess.get("subject_uid", "")
-        # Update prompt history
+        # Update prompt history (store truncated to avoid bloating session)
         if "asked_prompts" not in sess: sess["asked_prompts"] = []
-        sess["asked_prompts"].append(q["prompt"])
-        if len(sess["asked_prompts"]) > 20:
-            sess["asked_prompts"] = sess["asked_prompts"][-20:]
+        sess["asked_prompts"].append(q["prompt"][:80])
+        if len(sess["asked_prompts"]) > 5:
+            sess["asked_prompts"] = sess["asked_prompts"][-5:]
         
-        # Save question details
+        # Save question details (prompt truncated to 120 chars to reduce session size)
         if "question_details" not in sess: sess["question_details"] = {}
         sess["question_details"][q["question_uid"]] = {
-            "prompt": q["prompt"],
+            "prompt": q["prompt"][:120],
             "correct_data": q["meta"].get("correct_data"),
             "options": q.get("options"),
             "type": q.get("type"),
-            "difficulty": q["meta"].get("difficulty", 5), # Default to 5 if missing
+            # Use d (1-10 adaptive scale) so difficulty_weighted_bayesian gets correct weights.
+            # meta.difficulty is on a 0-1 scale and would produce near-zero weights (0.01-0.1).
+            "difficulty": d,
         }
 
     sess["last_question_uid"] = q["question_uid"]
@@ -1478,7 +2859,8 @@ async def _next_question(sess: Dict) -> Optional[Dict]:
     "/assessment/next",
     responses={400: {"model": ApiError}},
 )
-async def next_question(payload: NextRequest):
+async def next_question(payload: NextRequest, request: Request):
+    _enforce_rate_limit(request, route_key="assessment_next", limit=120, window_sec=60)
     try:
         sid = payload.assessment_session_id
         sess = _get_session(sid)
@@ -1491,12 +2873,19 @@ async def next_question(payload: NextRequest):
         if "question_details" in sess and payload.question_uid in sess["question_details"]:
             q_data = sess["question_details"][payload.question_uid]
             
-        score = _evaluate(payload.answer, q_data)
-        if score >= 0.5:
-            sess["good"] += 1
+        already_answered = payload.question_uid in (sess.get("asked") or [])
+        if already_answered:
+            logger.warning("duplicate_question_submission", question_uid=payload.question_uid, session_id=sid)
+            score = float((q_data or {}).get("score", 0.0))
+            if not q_data or "score" not in q_data:
+                score = _evaluate(payload.answer, q_data)
         else:
-            sess["bad"] += 1
-        sess["asked"].append(payload.question_uid)
+            score = _evaluate(payload.answer, q_data)
+            if score >= 0.5:
+                sess["good"] += 1
+            else:
+                sess["bad"] += 1
+            sess["asked"].append(payload.question_uid)
         
         # Save user answer
         if "question_details" in sess and payload.question_uid in sess["question_details"]:
@@ -1506,17 +2895,39 @@ async def next_question(payload: NextRequest):
                 sess["question_details"][payload.question_uid]["user_answer"] = ans_dict
                 sess["question_details"][payload.question_uid]["score"] = score
             except Exception as e:
-                print(f"Error saving answer: {e}")
+                logger.warning("answer_save_error", error=str(e))
 
         if not _save_session(sid, sess):
-            print(f"Warning: Failed to save session {sid} in next_question")
+            logger.warning("session_save_failed_next", session_id=sid)
         
         done_by_min = len(sess["asked"]) >= sess["min_questions"] and _confidence(sess) >= sess["target_confidence"]
         done_by_max = len(sess["asked"]) >= sess["max_questions"]
+
+        # Pattern detection: extend if random guessing suspected
+        if done_by_min and not done_by_max:
+            from app.services.reasoning.pattern_detector import should_extend_assessment
+            correctness = [
+                float(sess["question_details"].get(uid, {}).get("score", 0)) >= 0.5
+                for uid in sess["asked"]
+            ]
+            pattern_check = should_extend_assessment(correctness)
+            if pattern_check["extend"]:
+                new_max = min(
+                    sess["max_questions"],
+                    len(sess["asked"]) + pattern_check["extra_questions"],
+                )
+                if len(sess["asked"]) < new_max:
+                    done_by_min = False
+        # Extract difficulty hint from StudyNinja-API (time-aware adapt_difficulty result)
+        difficulty_hint: Optional[int] = None
+        if payload.client_meta and payload.client_meta.current_difficulty is not None:
+            difficulty_hint = int(payload.client_meta.current_difficulty)
+        is_correct = score >= 0.5
+        answer_score = score
         async def _stream():
             try:
                 yield "event: ack\n"
-                yield "data: {\"items\":[{\"accepted\":true}],\"meta\":{}}\n\n"
+                yield "data: " + json.dumps({"accepted": True, "meta": {}, "is_correct": is_correct, "score": round(answer_score, 4)}, ensure_ascii=False) + "\n\n"
                 if done_by_min or done_by_max:
                     # Precise Score Calculation
                     # Calculate weighted score based on difficulty
@@ -1540,15 +2951,15 @@ async def next_question(payload: NextRequest):
                             total_difficulty += diff
                             
                     raw_score = total_weighted_score / max(1.0, total_difficulty)
-                    score = round(raw_score, 2)
+                    overall_score = round(raw_score, 2)
 
                     # Expanded analytics
                     gaps = []
-                    if score < 0.85:
+                    if overall_score < 0.85:
                         gaps.append("Есть пробелы в понимании сложных аспектов темы")
-                    if score < 0.6:
+                    if overall_score < 0.6:
                         gaps.append("Требуется повторение базовых определений")
-                    if score < 0.4:
+                    if overall_score < 0.4:
                         gaps.append("Критические пробелы в знаниях")
                     
                     # Generate LLM Analytics
@@ -1562,33 +2973,24 @@ async def next_question(payload: NextRequest):
                         # Sort by order asked if possible, or just iterate
                         asked_uids = sess.get("asked", [])
                         
-                        for i, uid in enumerate(asked_uids):
+                        for i, uid in enumerate(asked_uids[:8]):
                              if uid in q_details:
                                  qd = q_details[uid]
-                                 history_text += f"Q{i+1}: {qd.get('prompt')}\\n"
-                                 history_text += f"User Answer: {qd.get('user_answer')}\\n"
-                                 history_text += f"Correct Data: {qd.get('correct_data')}\\n"
-                                 history_text += f"Score: {qd.get('score')}\\n\\n"
+                                 computed_score = float(qd.get('score') or 0.0)
+                                 result_label = "ВЕРНО ✓" if computed_score >= 0.5 else "НЕВЕРНО ✗"
+                                 history_text += f"Q{i+1}: {str(qd.get('prompt') or '')[:120]}\\n"
+                                 history_text += f"User Answer: {str(qd.get('user_answer') or '')[:100]}\\n"
+                                 history_text += f"Correct Data: {str(qd.get('correct_data') or '')[:100]}\\n"
+                                 history_text += f"Score: {computed_score} ({result_label})\\n\\n"
                         
                         sys_prompt = (
-                            "You are an expert tutor. Analyze the student's session history detailedly.\\n"
-                            "LANGUAGE: All output text (feedback, comments, recommendations) MUST be in RUSSIAN.\\n"
-                            "1. Re-evaluate every answer. BE LENIENT with formatting errors (e.g. 0.2 vs 2/10, or missing units). If the student shows understanding but failed specific format, give PARTIAL credit (0.5).\\n"
-                            "2. Calculate the precise knowledge level (0-100%) based on ACTUAL correctness. Focus on CONCEPTUAL understanding.\\n"
-                            "3. Provide a specific, constructive feedback for EACH question (why it was right/wrong).\\n"
-                            "4. Identify specific knowledge gaps (e.g. 'confuses radius and diameter').\\n"
-                            "5. Provide a tailored recommendation (NOT just 'next topic', but specific actions).\\n"
-                            "Output JSON format:\\n"
-                            "{\\n"
-                            "  \"questions_analytics\": [\\n"
-                            "    {\"question_uid\": \"...\", \"feedback\": \"...\"}\\n"
-                            "  ],\\n"
-                            "  \"overall_comment\": \"...\",\\n"
-                            "  \"knowledge_level_percent\": 85,\\n"
-                            "  \"specific_gaps\": [\"...\", \"...\"],\\n"
-                            "  \"recommendation\": \"...\"\\n"
-                            "}\\n"
-                            "Return ONLY JSON."
+                            "Ты тьютор-аналитик. Отвечай ТОЛЬКО на русском и только JSON.\\n"
+                            "Используй Score как ground truth (ВЕРНО/НЕВЕРНО).\\n"
+                            "Дай краткий feedback по каждому вопросу, общий комментарий, gaps, recommendation, strengths.\\n"
+                            "Формат JSON: "
+                            '{"questions_analytics":[{"question_uid":"...","feedback":"..."}],'
+                            '"overall_comment":"...","knowledge_level_percent":85,'
+                            '"specific_gaps":["..."],"recommendation":"...","strength":"..."}'
                         )
                         
                         # Call LLM
@@ -1598,7 +3000,12 @@ async def next_question(payload: NextRequest):
                              {"role": "user", "content": f"Topic: {sess.get('topic_uid')}\\n\\nHistory:\\n{history_text}"}
                         ]
                         
-                        llm_resp = await openai_chat_async(messages, temperature=0.3)
+                        llm_resp = await openai_chat_async(
+                            messages,
+                            temperature=0.2,
+                            feature="assessment_final_analytics",
+                            max_tokens=500,
+                        )
                         
                         if not llm_resp.get("ok"):
                              raise Exception(f"LLM Error: {llm_resp.get('error')}")
@@ -1612,31 +3019,66 @@ async def next_question(payload: NextRequest):
                         
                         llm_analytics = json.loads(content_str)
                     except Exception as e:
-                        print(f"LLM Analytics failed: {e}")
+                        logger.warning("llm_analytics_failed", error=str(e))
                         import traceback
                         traceback.print_exc()
                         # Fallback
-                        llm_analytics = {"questions_analytics": [], "overall_comment": "Detailed analysis unavailable due to service error.", "knowledge_level_percent": int(score*100), "specific_gaps": [], "recommendation": "Review the material."}
+                        llm_analytics = {"questions_analytics": [], "overall_comment": "Detailed analysis unavailable due to service error.", "knowledge_level_percent": int(overall_score * 100), "specific_gaps": [], "recommendation": "Review the material."}
 
                     # Use LLM calculated level if reasonable, else fallback to raw score
                     llm_level = llm_analytics.get("knowledge_level_percent")
-                    final_percentage = llm_level if isinstance(llm_level, (int, float)) else int(score * 100)
+                    final_percentage = llm_level if isinstance(llm_level, (int, float)) else int(overall_score * 100)
                     
                     # Normalized score for mastery consistency
                     normalized_score = final_percentage / 100.0
 
+                    # Build structured_gaps from question-level analysis
+                    structured_gaps = []
+                    q_details_for_gaps = sess.get("question_details", {})
+                    for uid in sess.get("asked", []):
+                        qd = q_details_for_gaps.get(uid, {})
+                        q_score = float(qd.get("score", 0.0))
+                        if q_score < 0.5:
+                            structured_gaps.append({
+                                "topic_uid": sess.get("topic_uid", ""),
+                                "question_uid": uid,
+                                "mastery_pct": int(q_score * 100),
+                                "gap_type": "conceptual" if q_score == 0.0 else "partial",
+                            })
+
+                    # Build enriched questions_review with per-question data
+                    llm_feedback_map = {
+                        qa.get("question_uid"): qa.get("feedback", "")
+                        for qa in llm_analytics.get("questions_analytics", [])
+                        if isinstance(qa, dict) and qa.get("question_uid")
+                    }
+                    enriched_review = []
+                    for uid in sess.get("asked", []):
+                        qd = q_details_for_gaps.get(uid, {})
+                        enriched_review.append({
+                            "question_uid": uid,
+                            "prompt": qd.get("prompt", ""),
+                            "type": qd.get("type", ""),
+                            "options": qd.get("options", []),
+                            "user_answer": qd.get("user_answer") or {},
+                            "correct_data": qd.get("correct_data"),
+                            "is_correct": float(qd.get("score", 0.0)) >= 0.5,
+                            "feedback": llm_feedback_map.get(uid, ""),
+                        })
+
                     # Detailed analytics
                     detailed_analytics = {
                         "gaps": llm_analytics.get("specific_gaps", gaps),
-                        "recommended_focus": llm_analytics.get("recommendation", "Повторить теорию и пройти практику 'We Do'" if score < 0.7 else "Закрепить успех практикой"),
-                        "strength": "Хорошая скорость ответов" if score > 0.8 else "Внимательность к деталям",
+                        "structured_gaps": structured_gaps,
+                        "recommended_focus": llm_analytics.get("recommendation", "Повторить теорию и пройти практику 'We Do'" if overall_score < 0.7 else "Закрепить успех практикой"),
+                        "strength": llm_analytics.get("strength", "Хорошая скорость ответов" if overall_score > 0.8 else "Внимательность к деталям"),
                         "current_percentage": final_percentage,
                         "topic_breakdown": [
                             {"subtopic": "Theory", "mastery": min(100, int(final_percentage * 1.1))},
                             {"subtopic": "Practice", "mastery": int(final_percentage)},
                             {"subtopic": "Application", "mastery": int(final_percentage * 0.9)}
                         ],
-                        "questions_review": llm_analytics.get("questions_analytics", []),
+                        "questions_review": enriched_review,
                         "tutor_comment": llm_analytics.get("overall_comment", "")
                     }
 
@@ -1655,15 +3097,32 @@ async def next_question(payload: NextRequest):
                     yield "event: done\n"
                     yield "data: " + json.dumps(res, ensure_ascii=False) + "\n\n"
                     return
-                q = await _next_question(sess)
+                q = await _next_question(sess, difficulty_hint=difficulty_hint)
                 if not q:
                     yield "event: error\n"
                     yield "data: {\"error\": \"Unable to generate next question\"}\n\n"
                     return
                 if not _save_session(sid, sess): # Save updated session after selecting next question
-                    print(f"Warning: Failed to save session {sid} after selecting next question")
+                    logger.warning("session_save_failed_after_next", session_id=sid)
+                from app.services.reasoning.bayesian_confidence import difficulty_weighted_bayesian
+                _bay = difficulty_weighted_bayesian(
+                    [
+                        {"correct": float(sess["question_details"].get(uid, {}).get("score", 0.0)) >= 0.5,
+                         "difficulty": float(sess["question_details"].get(uid, {}).get("difficulty", 5.0))}
+                        for uid in sess.get("asked", [])
+                    ],
+                    variance_threshold=0.02,
+                )
                 yield "event: question\n"
-                yield "data: " + json.dumps({"is_completed": False, "items":[q], "meta": {}}, ensure_ascii=False) + "\n\n"
+                yield "data: " + json.dumps({
+                    "is_completed": False,
+                    "items": [q],
+                    "meta": {},
+                    "confidence": _bay["confidence"],
+                    "variance": _bay["variance"],
+                    "posterior_a": _bay["posterior_a"],
+                    "posterior_b": _bay["posterior_b"],
+                }, ensure_ascii=False) + "\n\n"
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -1677,3 +3136,138 @@ async def next_question(payload: NextRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Assessment answer history
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/assessment/history/{session_id}",
+    summary="Get assessment question-answer history",
+    responses={404: {"model": ApiError}},
+)
+async def assessment_history(session_id: str):
+    """Return per-question answer history for a completed assessment session."""
+    sess = _get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    asked_uids = sess.get("asked", [])
+    q_details = sess.get("question_details", {})
+
+    def _option_text_by_uid(opts: list, uid: str) -> Optional[str]:
+        """Resolve option uid to human-readable text."""
+        if not opts or not isinstance(opts, list):
+            return None
+        for opt in opts:
+            if isinstance(opt, dict) and (opt.get("option_uid") == uid or opt.get("uid") == uid):
+                return opt.get("text") or opt.get("label") or None
+        return None
+
+    def _resolve_correct_text(correct_data, options) -> Optional[str]:
+        """Extract human-readable correct answer from correct_data."""
+        if not correct_data:
+            return None
+        if not isinstance(correct_data, dict):
+            return str(correct_data)
+
+        # 1. Direct correct_value (DB questions: {"correct_value": "42"})
+        cv = correct_data.get("correct_value")
+        if cv is not None:
+            return str(cv)
+
+        # 2. correct_answer field (LLM generated)
+        ca = correct_data.get("correct_answer")
+        if ca is not None:
+            return str(ca)
+
+        # 3. Correct option by uid
+        c_uid = correct_data.get("correct_option_uid")
+        if c_uid and options:
+            t = _option_text_by_uid(options, c_uid)
+            if t:
+                return t
+
+        # 4. Find correct option from options list (is_correct flag)
+        if options and isinstance(options, list):
+            correct_opts = [o for o in options if isinstance(o, dict) and o.get("is_correct")]
+            if correct_opts:
+                texts = [o.get("text") or o.get("label") or "?" for o in correct_opts]
+                return "; ".join(texts)
+
+        # 5. Fallback to value/text fields
+        for key in ("value", "text", "answer"):
+            v = correct_data.get(key)
+            if v is not None:
+                return str(v)
+
+        return None
+
+    def _resolve_user_text(user_answer, options) -> Optional[str]:
+        """Extract human-readable user answer."""
+        if not user_answer:
+            return None
+        if not isinstance(user_answer, dict):
+            return str(user_answer)
+
+        # 1. Selected options — resolve to text
+        selected = user_answer.get("selected_option_uids") or []
+        if selected and options:
+            texts = []
+            for s_uid in selected:
+                t = _option_text_by_uid(options, s_uid)
+                texts.append(t if t else s_uid)
+            return "; ".join(texts)
+
+        # 2. Free text answer
+        if user_answer.get("text"):
+            text = str(user_answer["text"])
+            if text.strip().lower() == "__idk__":
+                return "Я не знаю"
+            return text
+
+        # 3. Numeric value (skip sentinel 0 when no other data)
+        val = user_answer.get("value")
+        if val is not None:
+            return str(val)
+
+        return None
+
+    items: List[Dict[str, Any]] = []
+    seen_uids: Set[str] = set()
+    for uid in asked_uids:
+        if uid in seen_uids:
+            continue
+        seen_uids.add(uid)
+        qd = q_details.get(uid, {})
+        score = float(qd.get("score", 0.0))
+        user_answer = qd.get("user_answer")
+        if not user_answer:
+            continue
+        correct_data = qd.get("correct_data")
+        options = qd.get("options")
+
+        correct_text = _resolve_correct_text(correct_data, options)
+        user_text = _resolve_user_text(user_answer, options)
+        if user_text is None:
+            continue
+
+        items.append({
+            "index": len(items) + 1,
+            "question_uid": uid,
+            "prompt": qd.get("prompt", ""),
+            "question_type": qd.get("type", "unknown"),
+            "difficulty": float(qd.get("difficulty", 5.0)),
+            "user_answer": user_text,
+            "correct_answer": correct_text,
+            "is_correct": score >= 0.5,
+            "score": score,
+        })
+
+    return {
+        "session_id": session_id,
+        "total_questions": len(items),
+        "correct_count": sum(1 for it in items if it["is_correct"]),
+        "items": items,
+    }

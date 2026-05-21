@@ -7,9 +7,23 @@ import os
 from typing import List
 import requests
 
-# OpenAI API configuration
+# LLM Provider configuration
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter").lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_API_URL = "https://api.openai.com/v1/embeddings"
+OPEN_ROUTER_API_KEY = os.getenv("OPEN_ROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_HTTP_PROXY = os.getenv("OPENROUTER_HTTP_PROXY", "")
+
+# Determine which API key and URL to use based on provider
+if LLM_PROVIDER == "openrouter":
+    API_KEY = OPEN_ROUTER_API_KEY or OPENAI_API_KEY
+    API_URL = OPENROUTER_BASE_URL
+    HTTP_PROXY = OPENROUTER_HTTP_PROXY
+else:
+    API_KEY = OPENAI_API_KEY
+    API_URL = "https://api.openai.com/v1/embeddings"
+    HTTP_PROXY = ""
+
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "768"))
 
@@ -31,16 +45,16 @@ def generate_embedding(text: str) -> List[float]:
     if not text or not text.strip():
         raise ValueError("Text cannot be empty")
 
-    if not OPENAI_API_KEY:
+    if not API_KEY:
         # Return zero vector if API key is not configured (for testing)
-        print("⚠️ Warning: OPENAI_API_KEY not configured, returning zero vector")
+        print("⚠️ Warning: LLM API key not configured, returning zero vector")
         return [0.0] * EMBEDDING_DIMENSIONS
 
     try:
         # Prepare API request
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}"
+            "Authorization": f"Bearer {API_KEY}"
         }
 
         payload = {
@@ -50,11 +64,13 @@ def generate_embedding(text: str) -> List[float]:
         }
 
         # Make API request
+        proxies = {"http": HTTP_PROXY, "https": HTTP_PROXY} if HTTP_PROXY else None
         response = requests.post(
-            OPENAI_API_URL,
+            API_URL,
             headers=headers,
             json=payload,
-            timeout=30
+            timeout=30,
+            proxies=proxies,
         )
 
         # Check response status
@@ -100,16 +116,16 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
     if not texts:
         raise ValueError("Texts list cannot be empty")
 
-    if not OPENAI_API_KEY:
+    if not API_KEY:
         # Return zero vectors if API key is not configured (for testing)
-        print("⚠️ Warning: OPENAI_API_KEY not configured, returning zero vectors")
+        print("⚠️ Warning: LLM API key not configured, returning zero vectors")
         return [[0.0] * EMBEDDING_DIMENSIONS for _ in texts]
 
     try:
         # Prepare API request
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}"
+            "Authorization": f"Bearer {API_KEY}"
         }
 
         payload = {
@@ -119,11 +135,13 @@ def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
         }
 
         # Make API request
+        proxies = {"http": HTTP_PROXY, "https": HTTP_PROXY} if HTTP_PROXY else None
         response = requests.post(
-            OPENAI_API_URL,
+            API_URL,
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=60,
+            proxies=proxies,
         )
 
         # Check response status
@@ -164,6 +182,7 @@ def get_embedding_info() -> dict:
     return {
         "model": EMBEDDING_MODEL,
         "dimensions": EMBEDDING_DIMENSIONS,
-        "api_configured": bool(OPENAI_API_KEY),
-        "api_url": OPENAI_API_URL
+        "provider": LLM_PROVIDER,
+        "api_configured": bool(API_KEY),
+        "api_url": API_URL
     }

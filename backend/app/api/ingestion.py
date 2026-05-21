@@ -9,6 +9,7 @@ from app.db.pg import get_conn, ensure_tables
 from app.schemas.proposal import ProposalStatus
 from app.api.common import StandardResponse
 from app.core.context import get_tenant_id
+from app.events.telemetry import track_event
 import json
 
 router = APIRouter(prefix="/v1/ingestion", tags=["Ingestion"], dependencies=[Security(HTTPBearer())])
@@ -78,7 +79,11 @@ async def generate_proposal(payload: GenerateProposalInput, tenant_id: str = Dep
             )
         conn.close()
         
+        try:
+            track_event("kb_ingestion_proposal_generated", {"proposal_id": p.proposal_id, "strategy": payload.strategy_type, "ops_count": len(ops)})
+        except Exception:
+            pass
         return {"items": [{"proposal_id": p.proposal_id, "status": ProposalStatus.DRAFT.value, "ops_count": len(ops)}], "meta": {}}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save proposal: {str(e)}")

@@ -100,6 +100,22 @@ def ensure_tables():
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_curriculum_nodes_curriculum_id ON curriculum_nodes (curriculum_id)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS personal_prereq_weights (
+              tenant_id TEXT NOT NULL DEFAULT 'default',
+              user_uid TEXT NOT NULL,
+              topic_uid TEXT NOT NULL,
+              prereq_uid TEXT NOT NULL,
+              weight_factor DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+              updated_at TIMESTAMP DEFAULT NOW(),
+              PRIMARY KEY (tenant_id, user_uid, topic_uid, prereq_uid)
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_personal_prereq_weights_user ON personal_prereq_weights (tenant_id, user_uid)"
+        )
     conn.close()
     try:
         conn = get_conn()

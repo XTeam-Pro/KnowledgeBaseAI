@@ -14,7 +14,19 @@ try:
         )
 except Exception:
     pass
-oai = AsyncOpenAI(api_key=settings.openai_api_key.get_secret_value())
+
+# Configure OpenAI client based on LLM_PROVIDER setting
+def _get_oai_client():
+    provider = settings.llm_provider.lower()
+    if provider == "openrouter":
+        api_key = settings.open_router_api_key.get_secret_value() if settings.open_router_api_key else ""
+        base_url = settings.openrouter_base_url
+    else:
+        api_key = settings.openai_api_key.get_secret_value() if settings.openai_api_key else ""
+        base_url = None
+    return AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=20.0)
+
+oai = _get_oai_client()
 async def embed_text(text: str) -> List[float]:
     resp = await oai.embeddings.create(model="text-embedding-3-small", input=text)
     return resp.data[0].embedding

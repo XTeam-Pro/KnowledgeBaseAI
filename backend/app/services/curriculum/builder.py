@@ -25,36 +25,32 @@ async def generate_curriculum_llm(goal: str, audience: str, subject_uids: Option
     if not rows:
         return {"ok": False, "error": "No topics found in graph"}
         
-    candidates = [{"uid": r["uid"], "title": r["title"], "subject": r.get("subject")} for r in rows]
+    candidates = [{"uid": r["uid"], "title": (r["title"] or "")[:80], "subject": (r.get("subject") or "")[:40]} for r in rows]
     
     # 2. Ask LLM to select and order
     prompt = f"""
-    You are an expert curriculum designer.
+    Build a concise curriculum JSON.
     Goal: "{goal}"
-    Target Audience: "{audience}"
-    
-    Available Topics (Candidates):
-    {json.dumps(candidates[:300], ensure_ascii=False)} 
-    (List truncated to 300 items if longer)
-    
-    Task:
-    Select the most relevant topics from the candidates list to achieve the goal.
-    Order them logically (from basic to advanced).
-    If the goal involves a specific exam structure (e.g. EGE, OGE), assign the corresponding 'exam_task_number' (e.g. "1", "2", "19") to the topic if applicable. If not applicable, set it to null.
-    
-    Return JSON:
+    Audience: "{audience}"
+    Candidates (top 120): {json.dumps(candidates[:120], ensure_ascii=False)}
+    Pick relevant topics and order basic->advanced.
+    If exam mapping is clear, set exam_task_number, else null.
+    Return JSON only:
     {{
-        "title": "Suggested Curriculum Title",
-        "standard": "Suggested Standard (e.g. CEFR B1, Corporate Policy, etc)",
-        "selected_items": [
-            {{"uid": "uid1", "exam_task_number": "1"}},
-            {{"uid": "uid2", "exam_task_number": null}}
-        ]
+      "title":"...",
+      "standard":"...",
+      "selected_items":[{{"uid":"...","exam_task_number":"1"}},{{"uid":"...","exam_task_number":null}}]
     }}
     """
     
     messages = [{"role": "user", "content": prompt}]
-    res = await openai_chat_async(messages, temperature=0.2)
+    res = await openai_chat_async(
+        messages,
+        temperature=0.2,
+        feature="curriculum_generate",
+        max_tokens=700,
+        response_format={"type": "json_object"},
+    )
     
     if not res.get("ok"):
         return {"ok": False, "error": f"LLM error: {res.get('error')}"}

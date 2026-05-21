@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +29,7 @@ except Exception:
     graphql_router = None
 from app.api.validation import router as validation_router
 from app.api.auth import router as auth_router
+from app.api.deps import require_engine_access
 from app.services.auth.users_repo import ensure_bootstrap_admin
 from app.core.migrations import check_and_gatekeep
 try:
@@ -78,6 +79,54 @@ tags_metadata = [
 ]
 
 from app.api.common import ApiError
+from contextlib import asynccontextmanager
+
+
+async def _cleanup_orphan_sessions():
+    """Background task: scan for sess:* keys missing TTL and set 86400s."""
+    from app.events.publisher import get_redis
+    while True:
+        try:
+            await asyncio.sleep(3600)  # run every hour
+            r = get_redis()
+            cursor = 0
+            fixed = 0
+            while True:
+                cursor, keys = r.scan(cursor=cursor, match="sess:*", count=200)
+                for key in keys:
+                    ttl = r.ttl(key)
+                    # ttl == -1 means no expiry set; ttl == -2 means key gone
+                    if ttl == -1:
+                        r.expire(key, 86400)
+                        fixed += 1
+                if cursor == 0:
+                    break
+            if fixed > 0:
+                logger.info("session_cleanup", fixed_keys=fixed)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("session_cleanup_error", error=str(exc))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_logging()
+    logger.info("startup", neo4j_uri=settings.neo4j_uri)
+    ok = check_and_gatekeep()
+    if not ok:
+        raise SystemExit("Schema version gate failed")
+    ensure_bootstrap_admin()
+    cleanup_task = asyncio.create_task(_cleanup_orphan_sessions())
+    logger.info("session_cleanup_scheduled", interval_seconds=3600)
+    yield
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    logger.info("session_cleanup_stopped")
+
 
 app = FastAPI(
     title="KnowledgeBaseAI Engine",
@@ -98,28 +147,17 @@ app = FastAPI(
     contact={"name": "StudyNinja API", "url": "https://studyninja.ai", "email": "api@studyninja.ai"},
     license_info={"name": "Proprietary"},
     redoc_url=None,
+    lifespan=lifespan,
 )
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/redoc", include_in_schema=False)
-async def redoc_html():
+async def redoc_html(_auth=Depends(require_engine_access)):
     return get_redoc_html(openapi_url=app.openapi_url, title=app.title + " - ReDoc", redoc_js_url="/static/redoc/redoc.standalone.js")
 
 
 REQ_COUNTER = Counter("http_requests_total", "Total HTTP requests", ["method", "path", "status"])
 LATENCY = Histogram("http_request_latency_ms", "Request latency ms", ["method", "path"])
-
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    setup_logging()
-    logger.info("startup", neo4j_uri=settings.neo4j_uri)
-    ok = check_and_gatekeep()
-    if not ok:
-        raise SystemExit("Schema version gate failed")
-    ensure_bootstrap_admin()
-    yield
 
 @app.middleware("http")
 async def tenant_middleware(request, call_next):
@@ -201,11 +239,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(status_code=422, content=ae.model_dump())
 
 @app.get("/health", tags=["Система"], summary="Проверка состояния", description="Возвращает статус доступности ключевых зависимостей.")
-async def health():
+async def health(_auth=Depends(require_engine_access)):
     return {"openai": bool(settings.openai_api_key.get_secret_value()), "neo4j": bool(settings.neo4j_uri)}
 
 @app.get("/metrics", tags=["Система"], summary="Метрики Prometheus", description="Экспорт метрик в формате, совместимом с Prometheus.")
-async def metrics():
+async def metrics(_auth=Depends(require_engine_access)):
     from prometheus_client import generate_latest
     return generate_latest()
 
@@ -219,20 +257,27 @@ if origins:
         allow_headers=["*"],
     )
 
-app.include_router(engine_router, prefix="/v1/engine", tags=["Engine"])
+app.include_router(
+    engine_router,
+    prefix="/v1/engine",
+    tags=["Engine"],
+    dependencies=[Depends(require_engine_access)],
+)
 # app.include_router(roadmap_router, prefix="/v1/roadmap", tags=["Roadmap"])
-app.include_router(analytics_router)
-app.include_router(ws_router)
-app.include_router(admin_router)
-app.include_router(admin_curriculum_router)
-app.include_router(admin_graph_router)
-app.include_router(maintenance_router)
-app.include_router(proposals_router)
-app.include_router(ingestion_router)
+app.include_router(analytics_router, dependencies=[Depends(require_engine_access)])
+app.include_router(ws_router, dependencies=[Depends(require_engine_access)])
+app.include_router(admin_router, dependencies=[Depends(require_engine_access)])
+app.include_router(admin_curriculum_router, dependencies=[Depends(require_engine_access)])
+app.include_router(admin_graph_router, dependencies=[Depends(require_engine_access)])
+app.include_router(maintenance_router, dependencies=[Depends(require_engine_access)])
+app.include_router(proposals_router, dependencies=[Depends(require_engine_access)])
+app.include_router(ingestion_router, dependencies=[Depends(require_engine_access)])
 
-app.include_router(assistant_router)
+app.include_router(assistant_router, dependencies=[Depends(require_engine_access)])
 
 if graphql_router:
-    app.include_router(graphql_router, prefix="/v1/graphql")
-app.include_router(auth_router)
-app.include_router(validation_router)
+    app.include_router(
+        graphql_router, prefix="/v1/graphql", dependencies=[Depends(require_engine_access)]
+    )
+app.include_router(auth_router, dependencies=[Depends(require_engine_access)])
+app.include_router(validation_router, dependencies=[Depends(require_engine_access)])

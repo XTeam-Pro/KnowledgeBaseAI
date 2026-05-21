@@ -1,23 +1,32 @@
-from fastapi import APIRouter, HTTPException, Depends, Header, Security
+from fastapi import APIRouter, HTTPException, Depends, Header, Security, Query
 from fastapi.security import HTTPBearer
 from typing import Dict, Optional, List
 from pydantic import BaseModel, Field
 from app.schemas.proposal import Proposal, Operation, ProposalStatus
 from app.db.pg import get_conn, ensure_tables
 from app.services.proposal_service import create_draft_proposal
-from app.core.context import get_tenant_id
+from app.core.context import get_tenant_id, set_tenant_id
 from app.workers.commit import commit_proposal
 from app.db.pg import get_proposal, set_proposal_status, list_proposals
 from app.services.diff import build_diff
 from app.services.impact import impact_subgraph_for_proposal
 from app.api.common import StandardResponse
+from app.events.telemetry import track_event
 
 router = APIRouter(prefix="/v1/proposals", tags=["Управление контентом"], dependencies=[Security(HTTPBearer())])
 
-def require_tenant() -> str:
-    tid = get_tenant_id()
+def require_tenant(
+    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-ID"),
+    tenant_id: str | None = Query(default=None, alias="tenant_id"),
+) -> str:
+    tid = x_tenant_id or tenant_id or get_tenant_id()
     if not tid:
         raise HTTPException(status_code=400, detail="tenant_id missing")
+    tid = tid.strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="tenant_id missing")
+    # Keep tenant context consistent for downstream services/workers.
+    set_tenant_id(tid)
     return tid
 
 class CreateProposalResponse(BaseModel):
@@ -74,6 +83,10 @@ async def create_proposal(payload: CreateProposalInput, tenant_id: str = Depends
                 ),
             )
         conn.close()
+        try:
+            track_event("kb_proposal_created", {"proposal_id": p.proposal_id, "operations_count": len(ops)})
+        except Exception:
+            pass
         return {"items": [{"proposal_id": p.proposal_id, "proposal_checksum": p.proposal_checksum, "status": ProposalStatus.DRAFT.value}], "meta": {}}
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -103,6 +116,10 @@ async def commit(proposal_id: str, tenant_id: str = Depends(require_tenant), x_t
         status = res.get("status") or "FAILED"
         code = 409 if status == "CONFLICT" else 400
         raise HTTPException(status_code=code, detail=res)
+    try:
+        track_event("kb_proposal_committed", {"proposal_id": proposal_id})
+    except Exception:
+        pass
     return {"items": [res], "meta": {}}
 
 @router.get(
@@ -165,6 +182,10 @@ async def approve(proposal_id: str, tenant_id: str = Depends(require_tenant), x_
         status = res.get("status") or "FAILED"
         code = 409 if status == "CONFLICT" else 400
         raise HTTPException(status_code=code, detail=res)
+    try:
+        track_event("kb_proposal_approved", {"proposal_id": proposal_id})
+    except Exception:
+        pass
     return {"items": [res], "meta": {}}
 
 @router.post(
@@ -185,6 +206,10 @@ async def reject(proposal_id: str, tenant_id: str = Depends(require_tenant), x_t
     if not p or p["tenant_id"] != tenant_id:
         raise HTTPException(status_code=404, detail="proposal not found")
     set_proposal_status(proposal_id, ProposalStatus.REJECTED.value)
+    try:
+        track_event("kb_proposal_rejected", {"proposal_id": proposal_id})
+    except Exception:
+        pass
     return {"items": [{"ok": True, "status": ProposalStatus.REJECTED.value}], "meta": {}}
 
 @router.get(

@@ -1,14 +1,15 @@
 import math
+import re
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 class GeometryEngine:
-    CANVAS_MIN = -5.0
-    CANVAS_MAX = 5.0
+    CANVAS_MIN = 0.0
+    CANVAS_MAX = 10.0
     CANVAS_SIZE = 10.0
-    CENTER = 0.0
+    CENTER = 5.0
     MAX_OBJECTS = 3
     MIN_DISTANCE = 1.0
     TARGET_SIZE = 8.0  # Leave 1.0 margin on each side
@@ -32,13 +33,14 @@ class GeometryEngine:
     @staticmethod
     def normalize(shapes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Scales and centers the entire scene (collection of shapes) to fit within the 10x10 canvas.
-        Preserves relative positions of shapes within the scene.
+        Transforms coordinates from a logical Cartesian system [-5, 5] to the canvas system [0, 10].
+        Logical (0,0) maps to Canvas (5,5).
+        Preserves the aspect ratio and integer nature of coordinates where possible.
         """
         if not shapes:
             return []
 
-        # 1. Collect all points to find bounding box of the entire scene
+        # 1. Collect all points to check bounds
         all_points = []
         for shape in shapes:
             points = shape.get("points", shape.get("coordinates", []))
@@ -50,37 +52,25 @@ class GeometryEngine:
         if not all_points:
             return shapes
 
-        min_x = min(p["x"] for p in all_points)
-        max_x = max(p["x"] for p in all_points)
-        min_y = min(p["y"] for p in all_points)
-        max_y = max(p["y"] for p in all_points)
-
-        width = max_x - min_x
-        height = max_y - min_y
-
-        # 2. Calculate scale to fit in TARGET_SIZE x TARGET_SIZE
-        # Avoid division by zero
-        scale_x = GeometryEngine.TARGET_SIZE / width if width > 1e-6 else 1.0
-        scale_y = GeometryEngine.TARGET_SIZE / height if height > 1e-6 else 1.0
+        # 2. Determine Scale
+        # We want to map logical [-5, 5] to canvas [0, 10].
+        # If points exceed [-5, 5], we scale them down to fit.
+        # If they are within range, we keep scale = 1.0 to preserve "integer-ness" as requested.
+        max_abs_coord = 0.0
+        for p in all_points:
+            max_abs_coord = max(max_abs_coord, abs(p["x"]), abs(p["y"]))
         
-        # Use the smaller scale to fit both dimensions (uniform scaling)
-        # If one dimension is 0 (e.g. horizontal line), use the other scale
-        if width <= 1e-6:
-            scale = scale_y
-        elif height <= 1e-6:
-            scale = scale_x
-        else:
-            scale = min(scale_x, scale_y)
+        # Default logical limit is 5.0. If points go beyond (e.g. 10), we scale down.
+        # We allow a small epsilon for floating point noise.
+        limit = 5.0
+        scale = 1.0
+        if max_abs_coord > limit + 0.01:
+            scale = limit / max_abs_coord
             
-        # If both are 0 (single point), scale doesn't matter, set to 1
-        if width <= 1e-6 and height <= 1e-6:
-            scale = 1.0
+        # 3. Transform
+        # Formula: physical = logical * scale + center_offset
+        center_offset = GeometryEngine.CENTER # 5.0
 
-        # 3. Calculate current centroid of the bounding box
-        center_x = (min_x + max_x) / 2
-        center_y = (min_y + max_y) / 2
-
-        # 4. Transform points
         normalized_shapes = []
         for shape in shapes:
             # Deep copy to avoid modifying original
@@ -97,16 +87,30 @@ class GeometryEngine:
                 is_flat_point = True
             
             for p in points_source:
-                # Translate to 0,0 relative to bbox center, then scale, then translate to canvas center
-                nx = (p["x"] - center_x) * scale + GeometryEngine.CENTER
-                ny = (p["y"] - center_y) * scale + GeometryEngine.CENTER
+                # Apply transformation: Logical (0,0) -> Physical (5,5)
+                # Note: We do NOT flip Y here. We assume the frontend handles coordinate systems (or Y is up).
+                # If Y needs to be flipped for standard screen coords (y-down), it should be done here:
+                # ny = center_offset - (p["y"] * scale)
+                # But usually math graphs assume Y-up. Let's stick to simple translation for now unless broken.
                 
-                # Clamp to [-5, 5] just in case of float errors, though logic should keep it inside [-4, 4]
+                nx = (p["x"] * scale) + center_offset
+                ny = (p["y"] * scale) + center_offset
+                
+                # Clamp to [CANVAS_MIN, CANVAS_MAX]
                 nx = max(GeometryEngine.CANVAS_MIN, min(GeometryEngine.CANVAS_MAX, nx))
                 ny = max(GeometryEngine.CANVAS_MIN, min(GeometryEngine.CANVAS_MAX, ny))
                 
+                # Round to nearest integer (or 0.5) as requested
+                # User wants integers mostly.
+                # If we didn't scale (scale=1), we try to round to int/0.5
+                if scale > 0.99:
+                     nx = round(nx * 2) / 2.0
+                     ny = round(ny * 2) / 2.0
+                     if abs(nx - round(nx)) < 0.01: nx = int(round(nx))
+                     if abs(ny - round(ny)) < 0.01: ny = int(round(ny))
+                
                 new_points.append({"x": nx, "y": ny})
-            
+
             # Update the shape with new points using the same key as found
             if is_flat_point and new_points:
                 new_shape["x"] = new_points[0]["x"]
@@ -115,10 +119,192 @@ class GeometryEngine:
                 new_shape["points"] = new_points
             else:
                 new_shape["coordinates"] = new_points
-                
+
+            # Normalize vertex_labels using the same transform so labels track their vertices
+            if "vertex_labels" in shape and isinstance(shape["vertex_labels"], list):
+                new_vertex_labels = []
+                for vl in shape["vertex_labels"]:
+                    vx = float(vl.get("x", 0))
+                    vy = float(vl.get("y", 0))
+                    vnx = (vx * scale) + center_offset
+                    vny = (vy * scale) + center_offset
+                    vnx = max(GeometryEngine.CANVAS_MIN, min(GeometryEngine.CANVAS_MAX, vnx))
+                    vny = max(GeometryEngine.CANVAS_MIN, min(GeometryEngine.CANVAS_MAX, vny))
+                    if scale > 0.99:
+                        vnx = round(vnx * 2) / 2.0
+                        vny = round(vny * 2) / 2.0
+                        if abs(vnx - round(vnx)) < 0.01:
+                            vnx = int(round(vnx))
+                        if abs(vny - round(vny)) < 0.01:
+                            vny = int(round(vny))
+                    new_vertex_labels.append({**vl, "x": vnx, "y": vny})
+                new_shape["vertex_labels"] = new_vertex_labels
+
             normalized_shapes.append(new_shape)
             
         return normalized_shapes
+
+    @staticmethod
+    def snap_labels_to_vertices(shape: Dict[str, Any]) -> Dict[str, Any]:
+        """Snap every vertex_label to the nearest polygon vertex point.
+
+        LLM sometimes places labels at slightly different coordinates than the
+        actual polygon vertices. After normalization the drift can cause labels
+        to float in open space instead of sitting on a corner.
+        """
+        points = shape.get("points") or shape.get("coordinates") or []
+        vertex_labels = shape.get("vertex_labels")
+        if not points or not vertex_labels:
+            return shape
+
+        def _nearest(label_pt: Dict[str, Any]) -> Dict[str, Any]:
+            lx, ly = float(label_pt.get("x", 0)), float(label_pt.get("y", 0))
+            best = min(points, key=lambda p: (p["x"] - lx) ** 2 + (p["y"] - ly) ** 2)
+            return {**label_pt, "x": best["x"], "y": best["y"]}
+
+        new_shape = dict(shape)
+        new_shape["vertex_labels"] = [_nearest(vl) for vl in vertex_labels]
+        return new_shape
+
+    @staticmethod
+    def _angle_at_vertex(prev_p: Dict, curr_p: Dict, next_p: Dict) -> Optional[float]:
+        """Interior angle (degrees) at curr_p given the two adjacent vertices."""
+        v1 = (prev_p["x"] - curr_p["x"], prev_p["y"] - curr_p["y"])
+        v2 = (next_p["x"] - curr_p["x"], next_p["y"] - curr_p["y"])
+        mag1 = math.hypot(*v1)
+        mag2 = math.hypot(*v2)
+        if mag1 < 1e-9 or mag2 < 1e-9:
+            return None
+        cos_a = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (mag1 * mag2)))
+        return math.degrees(math.acos(cos_a))
+
+    @staticmethod
+    def validate_and_relabel_triangle(
+        shapes: List[Dict[str, Any]],
+        question_text: str,
+        angle_tolerance: float = 12.0,
+    ) -> List[Dict[str, Any]]:
+        """For triangles, extract angle constraints from question text and verify
+        that vertex labels are assigned to the correct vertices.
+
+        If labels are wrong, reassign them so the described angles match the
+        actual geometry.  Only triangles (3 points) are processed; other shapes
+        are returned unchanged.
+
+        ``angle_tolerance`` (degrees) is the allowed deviation between the
+        described angle and the computed one (accounts for LLM rounding).
+        """
+        # Parse "угол X = N" or "угол X равен N" patterns (Cyrillic + Latin labels)
+        _ANGLE_RE = re.compile(
+            r"(?:угол|угл)\w*\s+([A-Za-zА-Яа-я])\s*(?:=|равен|равн\w*|составляет|равняется)\s*(\d+)",
+            re.IGNORECASE,
+        )
+
+        constraints: Dict[str, float] = {}
+        for m in _ANGLE_RE.finditer(question_text):
+            constraints[m.group(1).upper()] = float(m.group(2))
+
+        if not constraints:
+            return shapes
+
+        result: List[Dict[str, Any]] = []
+        for shape in shapes:
+            points = shape.get("points") or shape.get("coordinates") or []
+            vertex_labels = shape.get("vertex_labels", [])
+            n = len(points)
+
+            if n != 3 or not vertex_labels:
+                result.append(shape)
+                continue
+
+            # Compute interior angle at each polygon vertex (index 0, 1, 2)
+            computed: List[Optional[float]] = []
+            for i in range(3):
+                a = GeometryEngine._angle_at_vertex(
+                    points[(i - 1) % 3], points[i], points[(i + 1) % 3]
+                )
+                computed.append(a)
+
+            # Current label at each vertex index
+            # vertex_labels may have fewer entries than points — pad with None
+            label_at: Dict[int, str] = {}
+            for vl in vertex_labels:
+                # Find which vertex index this label sits at (after snap)
+                lx, ly = float(vl.get("x", 0)), float(vl.get("y", 0))
+                idx = min(range(3), key=lambda i: (points[i]["x"] - lx) ** 2 + (points[i]["y"] - ly) ** 2)
+                label_at[idx] = vl.get("label", "")
+
+            # Build reverse map label→index
+            idx_of: Dict[str, int] = {v: k for k, v in label_at.items()}
+
+            # Check each constraint
+            mismatch = False
+            for label, expected_angle in constraints.items():
+                if label not in idx_of:
+                    continue
+                actual = computed[idx_of[label]]
+                if actual is None or abs(actual - expected_angle) > angle_tolerance:
+                    mismatch = True
+                    break
+
+            if not mismatch:
+                result.append(shape)
+                continue
+
+            # Try to find a permutation of label assignments that satisfies constraints
+            from itertools import permutations
+
+            current_labels = [label_at.get(i, "") for i in range(3)]
+            best_assignment: Optional[List[str]] = None
+
+            for perm in permutations(current_labels):
+                # perm[i] is the label we'd assign to vertex index i
+                ok = True
+                for label, expected_angle in constraints.items():
+                    try:
+                        vi = perm.index(label)
+                    except ValueError:
+                        continue
+                    a = computed[vi]
+                    if a is None or abs(a - expected_angle) > angle_tolerance:
+                        ok = False
+                        break
+                if ok:
+                    best_assignment = list(perm)
+                    break
+
+            if best_assignment is None:
+                # No valid relabeling found — keep original but log warning
+                logger.warning(
+                    "triangle_relabel_failed",
+                    constraints=constraints,
+                    computed_angles=computed,
+                    label_at=label_at,
+                )
+                result.append(shape)
+                continue
+
+            # Rebuild vertex_labels with new assignment (keep offset fields if any)
+            old_vl_by_label = {vl.get("label", ""): vl for vl in vertex_labels}
+            new_vertex_labels: List[Dict[str, Any]] = []
+            for i, new_label in enumerate(best_assignment):
+                if not new_label:
+                    continue
+                old_vl = old_vl_by_label.get(new_label, {})
+                new_vertex_labels.append(
+                    {**old_vl, "label": new_label, "x": points[i]["x"], "y": points[i]["y"]}
+                )
+
+            logger.info(
+                "triangle_relabeled",
+                old=label_at,
+                new={i: l for i, l in enumerate(best_assignment)},
+            )
+            new_shape = dict(shape)
+            new_shape["vertex_labels"] = new_vertex_labels
+            result.append(new_shape)
+
+        return result
 
     @staticmethod
     def check_collisions(shapes: List[Dict[str, Any]]) -> List[Tuple[int, int]]:
