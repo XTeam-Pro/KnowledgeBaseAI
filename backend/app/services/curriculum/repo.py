@@ -56,9 +56,10 @@ def add_curriculum_nodes(code: str, nodes: List[Dict]) -> Dict:
                 return {"ok": False, "error": "curriculum not found"}
             cid = row[0]
             for n in nodes:
+                quarter = n.get('quarter')
                 cur.execute(
-                    "INSERT INTO curriculum_nodes(curriculum_id, kind, canonical_uid, order_index, is_required, exam_task_number) VALUES (%s,%s,%s,%s,%s,%s)",
-                    (cid, n.get('kind'), n.get('canonical_uid'), int(n.get('order_index', 0)), bool(n.get('is_required', True)), n.get('exam_task_number'))
+                    "INSERT INTO curriculum_nodes(curriculum_id, kind, canonical_uid, order_index, is_required, exam_task_number, quarter) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (cid, n.get('kind'), n.get('canonical_uid'), int(n.get('order_index', 0)), bool(n.get('is_required', True)), n.get('exam_task_number'), int(quarter) if quarter is not None else None)
                 )
     conn.close()
     return {"ok": True}
@@ -93,7 +94,7 @@ def get_curriculum(code: str) -> Optional[Dict]:
                     "items": []
                 }
                 # Fetch nodes
-                cur.execute("SELECT kind, canonical_uid, order_index, is_required, exam_task_number FROM curriculum_nodes WHERE curriculum_id=%s ORDER BY order_index ASC", (cid,))
+                cur.execute("SELECT kind, canonical_uid, order_index, is_required, exam_task_number, quarter FROM curriculum_nodes WHERE curriculum_id=%s ORDER BY order_index ASC", (cid,))
                 nodes = cur.fetchall()
                 for n in nodes:
                     res["items"].append({
@@ -101,7 +102,8 @@ def get_curriculum(code: str) -> Optional[Dict]:
                         "canonical_uid": n[1],
                         "order_index": n[2],
                         "is_required": n[3],
-                        "exam_task_number": n[4]
+                        "exam_task_number": n[4],
+                        "quarter": n[5]
                     })
     conn.close()
     return res

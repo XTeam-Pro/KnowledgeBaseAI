@@ -95,7 +95,8 @@ def ensure_tables():
               kind TEXT NOT NULL,
               canonical_uid TEXT NOT NULL,
               order_index INTEGER NOT NULL,
-              is_required BOOLEAN DEFAULT TRUE
+              is_required BOOLEAN DEFAULT TRUE,
+              quarter SMALLINT
             )
             """
         )
