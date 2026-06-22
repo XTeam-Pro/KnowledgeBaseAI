@@ -80,6 +80,23 @@ def should_rebuild_roadmap(
     return False
 
 
+def _filter_nodes_by_quarter(nodes: List[Dict], quarter: int | None) -> List[Dict]:
+    """Keep curriculum nodes up to the given school quarter.
+
+    A node with quarter IS NULL is quarter-agnostic and always kept (e.g. exam
+    curricula). When ``quarter`` is None no filtering is applied. Otherwise only
+    nodes with ``node.quarter <= quarter`` (or NULL) are returned.
+    """
+    if quarter is None:
+        return list(nodes)
+    out: List[Dict] = []
+    for n in nodes:
+        q = n.get("quarter")
+        if q is None or int(q) <= int(quarter):
+            out.append(n)
+    return out
+
+
 def plan_route(
     subject_uid: str | None,
     progress: Dict[str, float],
@@ -90,6 +107,7 @@ def plan_route(
     force_rebuild: bool = False,
     student_tier: str = "standard",
     user_uid: str | None = None,
+    quarter: int | None = None,
 ) -> List[Dict]:
     # Apply tier-based limit override
     tier_cfg = TIER_CONFIG.get(student_tier, TIER_CONFIG["standard"])
@@ -97,7 +115,7 @@ def plan_route(
     select_count = tier_cfg["select"]
 
     # Hysteresis check
-    cache_key = f"{tenant_id or ''}:{subject_uid or ''}:{curriculum_code or ''}:{student_tier}:{user_uid or ''}"
+    cache_key = f"{tenant_id or ''}:{subject_uid or ''}:{curriculum_code or ''}:{student_tier}:{user_uid or ''}:q{quarter or ''}"
     if not force_rebuild and not should_rebuild_roadmap(cache_key, progress):
         cached = _roadmap_cache.get(cache_key, {})
         if cached.get("items"):
@@ -115,7 +133,8 @@ def plan_route(
             # Use only the explicitly seeded curriculum nodes — no PREREQ expansion.
             # Prerequisites are used for ordering/priority scoring only (lines below),
             # not as additional roadmap nodes.
-            root_nodes = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
+            cv_nodes = _filter_nodes_by_quarter(cv["nodes"], quarter)
+            root_nodes = [n["canonical_uid"] for n in cv_nodes if n.get("canonical_uid")]
             allowed_topics = set(root_nodes)
 
     # Define query filter

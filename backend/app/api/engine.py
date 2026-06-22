@@ -677,6 +677,33 @@ async def chat(payload: ChatInput, request: Request) -> Dict:
 
     return result
 
+# --- Curriculum nodes (ordered, quarter-aware) ---
+
+@router.get("/curriculum/nodes", summary="Ordered curriculum nodes (uid/order/quarter)")
+async def curriculum_nodes(code: str) -> Dict:
+    """Return the ordered nodes of a curriculum plan.
+
+    Used by the API-side quarterly-grade goal to resolve the expected-program
+    slice (план с order_index и quarter). Read-only; the curriculum structure is
+    not tenant-sensitive.
+    """
+    cv = get_graph_view(code)
+    if not cv.get("ok"):
+        return {"ok": False, "error": cv.get("error", "not_found"), "nodes": []}
+    nodes = [
+        {
+            "canonical_uid": n.get("canonical_uid"),
+            "order_index": n.get("order_index"),
+            "quarter": n.get("quarter"),
+            "is_required": n.get("is_required"),
+            "exam_task_number": n.get("exam_task_number"),
+        }
+        for n in (cv.get("nodes") or [])
+        if n.get("canonical_uid")
+    ]
+    return {"ok": True, "code": code, "nodes": nodes}
+
+
 # --- Roadmap ---
 
 class RoadmapNode(BaseModel):
@@ -710,6 +737,7 @@ async def roadmap(payload: RoadmapRequest, request: Request) -> Dict:
             curriculum_code=payload.curriculum_code,
             student_tier=payload.student_tier,
             user_uid=str(user_uid) if user_uid else None,
+            quarter=payload.quarter,
         )
         nodes = []
         for idx, item in enumerate(items):
@@ -966,6 +994,9 @@ class TopicsAvailableRequest(BaseModel):
     goal_type: Optional[GoalType] = None
     exam_type: Optional[ExamType] = None
     ignore_user_class_filter: bool = False
+    # Школьная четверть (1..4) для квартальных планов RU-SCHOOL-*: учитываются
+    # только узлы плана с quarter IS NULL или quarter <= указанной.
+    quarter: Optional[int] = None
 
     @field_validator('exam_type', mode='before')
     @classmethod
@@ -1099,12 +1130,14 @@ async def topics_available(payload: TopicsAvailableRequest) -> Dict:
     if payload.curriculum_code:
         cv = get_graph_view(payload.curriculum_code)
         if cv.get("ok") and cv.get("nodes"):
+             from app.services.roadmap_planner import _filter_nodes_by_quarter
+             cv_nodes = _filter_nodes_by_quarter(cv["nodes"], payload.quarter)
              curriculum_node_meta_by_uid = {
                  n["canonical_uid"]: n
-                 for n in cv["nodes"]
+                 for n in cv_nodes
                  if n.get("canonical_uid")
              }
-             curriculum_root_nodes = [n["canonical_uid"] for n in cv["nodes"] if n.get("canonical_uid")]
+             curriculum_root_nodes = [n["canonical_uid"] for n in cv_nodes if n.get("canonical_uid")]
              if curriculum_root_nodes:
                  # Exam curricula must be a hard boundary: return only explicitly
                  # seeded curriculum_nodes, not their PREREQ closure.

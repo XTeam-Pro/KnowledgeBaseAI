@@ -43,7 +43,9 @@ async def admin_add_curriculum_nodes(payload: CurriculumNodeInput, x_tenant_id: 
     """
     Принимает:
       - code: код плана
-      - nodes: список объектов {kind, canonical_uid, order_index, is_required}
+      - nodes: список объектов {kind, canonical_uid, order_index, is_required, exam_task_number?, quarter?}
+        где quarter (1..4) — номер школьной четверти для квартальных планов
+        (RU-SCHOOL-*); для экзаменационных планов quarter опускается (NULL).
 
     Возвращает:
       - ok: True/False

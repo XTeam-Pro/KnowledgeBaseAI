@@ -11,3 +11,6 @@ class RoadmapRequest(BaseModel):
     focus_topic_uid: Optional[str] = None
     curriculum_code: Optional[str] = None
     student_tier: str = "standard"
+    # Школьная четверть (1..4) для квартальных планов RU-SCHOOL-*: при наличии
+    # учитываются только узлы плана с quarter IS NULL или quarter <= указанной.
+    quarter: Optional[int] = Field(default=None, ge=1, le=4)
