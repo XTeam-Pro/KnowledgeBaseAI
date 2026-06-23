@@ -1709,9 +1709,11 @@ def _is_rate_limited_llm_error(value: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Question cache (Redis LIST per topic+difficulty_bucket, TTL=24h)
+# Question cache (Redis LIST per topic+difficulty_bucket, TTL=7d)
 # Saves 60-70% of LLM calls for popular topics.
 # ---------------------------------------------------------------------------
+
+_QUESTION_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 _q_cache_client: Any = None
 
@@ -1750,7 +1752,7 @@ async def _q_cache_store(topic_uid: str, difficulty: int, question: Dict) -> Non
         r = _get_q_cache_client()
         key = f"q_cache:{topic_uid}:{_q_difficulty_bucket(difficulty)}"
         await r.rpush(key, json.dumps(question))
-        await r.expire(key, 86400)  # 24-hour TTL
+        await r.expire(key, _QUESTION_CACHE_TTL_SECONDS)
     except Exception:
         pass
 
